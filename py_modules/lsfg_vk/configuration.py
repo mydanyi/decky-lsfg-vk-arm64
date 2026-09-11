@@ -8,7 +8,8 @@ from typing import Dict, Any
 from .base_service import BaseService
 from .config_schema import ConfigurationManager, CONFIG_SCHEMA, ProfileData, DEFAULT_PROFILE_NAME
 from .config_schema_generated import ConfigurationData, get_script_generation_logic
-from .constants import ARMADA_DEVICE_ENV, ARMADA_GAME_LAUNCH
+from .constants import ARMADA_DEVICE_ENV, ARMADA_GAME_LAUNCH, JSON_FILENAME
+from . import runtime_v2
 from .types import ConfigurationResponse, ProfilesResponse, ProfileResponse
 
 
@@ -41,21 +42,18 @@ class ConfigurationService(BaseService):
             
             config = ConfigurationManager.merge_config_with_script(toml_config, script_values)
             
-            return self._success_response(ConfigurationResponse, config=config)
+            return self._success_response(ConfigurationResponse, config=config, runtime_v2=self._uses_v2())
             
         except (OSError, IOError) as e:
             error_msg = f"Error reading lsfg config: {str(e)}"
             self.log.error(error_msg)
             return self._error_response(ConfigurationResponse, str(e), config=None)
         except Exception as e:
+            # A broken or undecodable config must surface as an error, never
+            # as success + editable defaults the UI would happily show.
             error_msg = f"Error parsing config file: {str(e)}"
             self.log.error(error_msg)
-            from .dll_detection import DllDetectionService
-            dll_service = DllDetectionService(self.log)
-            config = ConfigurationManager.get_defaults_with_dll_detection(dll_service)
-            return self._success_response(ConfigurationResponse, 
-                                        f"Using default configuration due to parse error: {str(e)}", 
-                                        config=config)
+            return self._error_response(ConfigurationResponse, str(e), config=None)
     
     def update_config_from_dict(self, config: ConfigurationData) -> ConfigurationResponse:
         """Update TOML configuration from configuration dictionary (eliminates parameter duplication)
@@ -124,7 +122,7 @@ class ConfigurationService(BaseService):
         generate_script_lines = get_script_generation_logic()
         lines.extend(generate_script_lines(config))
         
-        lines.append("export LSFG_PROCESS=decky-lsfg-vk")
+        lines.extend(self._runtime_lines(config, DEFAULT_PROFILE_NAME))
         lines.extend(self._generate_game_launch_lines())
         
         return "\n".join(lines) + "\n"
@@ -153,10 +151,22 @@ class ConfigurationService(BaseService):
         generate_script_lines = get_script_generation_logic()
         lines.extend(generate_script_lines(merged_config))
         
-        lines.append(f"export LSFG_PROCESS={current_profile}")
+        lines.extend(self._runtime_lines(merged_config, current_profile))
         lines.extend(self._generate_game_launch_lines())
         
         return "\n".join(lines) + "\n"
+
+    def _uses_v2(self) -> bool:
+        return runtime_v2.is_v2_manifest(self.local_share_dir / JSON_FILENAME)
+
+    def _runtime_lines(self, config: dict, profile: str) -> list[str]:
+        if not self._uses_v2():
+            return [f"export LSFG_PROCESS={profile}"]
+        path = self.config_dir / runtime_v2.RUNTIME_FILENAME
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # Keep the inode: the upstream config watcher watches this file for writes.
+        self._write_file(path, runtime_v2.runtime_toml(config), 0o644)
+        return runtime_v2.launch_lines(config, path)
 
     @staticmethod
     def _generate_game_launch_lines() -> list[str]:
@@ -279,7 +289,12 @@ class ConfigurationService(BaseService):
             
             script_result = self.update_lsfg_script_from_profile_data(new_profile_data)
             if not script_result["success"]:
-                self.log.warning(f"Failed to update launch script: {script_result['error']}")
+                # A failed runtime write must reach the frontend, not just the log.
+                self.log.error(f"Failed to write runtime configuration: {script_result['error']}")
+                return self._error_response(ProfileResponse,
+                                          script_result["error"],
+                                          message="Runtime configuration could not be written",
+                                          profile_name=None)
             
             self.log.info(f"Deleted profile '{profile_name}'")
             
@@ -318,7 +333,12 @@ class ConfigurationService(BaseService):
             
             script_result = self.update_lsfg_script_from_profile_data(new_profile_data)
             if not script_result["success"]:
-                self.log.warning(f"Failed to update launch script: {script_result['error']}")
+                # A failed runtime write must reach the frontend, not just the log.
+                self.log.error(f"Failed to write runtime configuration: {script_result['error']}")
+                return self._error_response(ProfileResponse,
+                                          script_result["error"],
+                                          message="Runtime configuration could not be written",
+                                          profile_name=None)
             
             self.log.info(f"Renamed profile '{old_name}' to '{normalized_name}'")
             
@@ -354,7 +374,12 @@ class ConfigurationService(BaseService):
             
             script_result = self.update_lsfg_script_from_profile_data(new_profile_data)
             if not script_result["success"]:
-                self.log.warning(f"Failed to update launch script: {script_result['error']}")
+                # A failed runtime write must reach the frontend, not just the log.
+                self.log.error(f"Failed to write runtime configuration: {script_result['error']}")
+                return self._error_response(ProfileResponse,
+                                          script_result["error"],
+                                          message="Runtime configuration could not be written",
+                                          profile_name=None)
             
             self.log.info(f"Set current profile to '{profile_name}'")
             
@@ -402,7 +427,7 @@ class ConfigurationService(BaseService):
             if profile_name == profile_data["current_profile"]:
                 script_result = self.update_lsfg_script_from_profile_data(profile_data)
                 if not script_result["success"]:
-                    self.log.warning(f"Failed to update launch script: {script_result['error']}")
+                    return script_result
             
             field_values = ", ".join(f"{k}={repr(v)}" for k, v in config.items())
             self.log.info(f"Updated profile '{profile_name}' configuration: {field_values}")

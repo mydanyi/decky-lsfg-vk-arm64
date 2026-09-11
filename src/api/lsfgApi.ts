@@ -42,6 +42,9 @@ export type LsfgConfig = ConfigurationData;
 export interface ConfigResult {
   success: boolean;
   config?: LsfgConfig;
+  // True when the installed layer is the lsfg-vk 2.0 runtime. Capabilities are
+  // reported out-of-band so the persisted profile schema stays unchanged.
+  runtime_v2?: boolean;
   error?: string;
 }
 

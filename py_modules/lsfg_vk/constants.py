@@ -30,6 +30,10 @@ ARMADA_GAME_LAUNCH = Path("/usr/libexec/armada/armada-game-launch")
 
 STEAM_COMMON_PATH = Path("steamapps/common/Lossless Scaling")
 LOSSLESS_DLL_NAME = "Lossless.dll"
+# lsfg-vk 1.x loads Lossless.dll, while lsfg-vk 2.0 loads lsfg-vk.dll. The two
+# files are not interchangeable, so detection picks the name from the engine
+# declared by the installed layer manifest (see dll_detection.py).
+LSFG_VK_DLL_NAME = "lsfg-vk.dll"
 
 ENV_LSFG_DLL_PATH = "LSFG_DLL_PATH"
 ENV_XDG_DATA_HOME = "XDG_DATA_HOME"

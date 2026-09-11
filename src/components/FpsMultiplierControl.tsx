@@ -13,8 +13,9 @@ export function FpsMultiplierControl({
   onConfigChange
 }: FpsMultiplierControlProps) {
   return (
-    <PanelSectionRow>
-      <Focusable
+    <>
+      <PanelSectionRow>
+        <Focusable
         style={{
           marginTop: "6px",
           marginBottom: "6px",
@@ -67,7 +68,21 @@ export function FpsMultiplierControl({
         >
           +
         </DialogButton>
-      </Focusable>
-    </PanelSectionRow>
+        </Focusable>
+      </PanelSectionRow>
+
+      <PanelSectionRow>
+        <div
+          style={{
+            fontSize: "11px",
+            lineHeight: "1.3",
+            opacity: 0.6,
+            textAlign: "center"
+          }}
+        >
+          {t('MULTIPLIER_RESTART_NOTE', 'Turning frame generation on or off requires restarting the game.')}
+        </div>
+      </PanelSectionRow>
+    </>
   );
 }

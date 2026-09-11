@@ -84,3 +84,9 @@ htmlcov/
 .vscode/settings.json
 .vscode/.ropeproject
 
+# Native runtime and commercial DLLs are separate from this source-only fork.
+/bin/
+*.dll
+*.so
+*.zip
+

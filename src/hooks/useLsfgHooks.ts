@@ -7,7 +7,8 @@ import {
   type ConfigUpdateResult
 } from "../api/lsfgApi";
 import { ConfigurationData, getDefaults } from "../config/configSchema";
-import { showErrorToast, ToastMessages } from "../utils/toastUtils";
+import { showConfigUpdateErrorToast } from "../utils/toastUtils";
+import t from "../i18n/i18n";
 
 export function useInstallationStatus() {
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
@@ -18,13 +19,15 @@ export function useInstallationStatus() {
       const status = await checkLsfgVkInstalled();
       setIsInstalled(status.installed);
       if (status.installed) {
-        setInstallationStatus("lsfg-vk Installed");
+        setInstallationStatus(t('STATUS_LSFG_INSTALLED', 'lsfg-vk Installed'));
+      } else if (status.error) {
+        setInstallationStatus(`${t('STATUS_INSTALL_FAILED_PREFIX', 'Installation failed:')} ${status.error}`);
       } else {
-        setInstallationStatus("lsfg-vk Not Installed");
+        setInstallationStatus(t('STATUS_LSFG_NOT_INSTALLED', 'lsfg-vk Not Installed'));
       }
       return status.installed;
     } catch (error) {
-      setInstallationStatus("lsfg-vk Not Installed");
+      setInstallationStatus(t('STATUS_LSFG_NOT_INSTALLED', 'lsfg-vk Not Installed'));
       return false;
     }
   };
@@ -51,12 +54,12 @@ export function useDllDetection() {
       const result = await checkLosslessScalingDll();
       setDllDetected(result.detected);
       if (result.detected) {
-        setDllDetectionStatus("Lossless Scaling Installed");
+        setDllDetectionStatus(t('STATUS_LOSSLESS_INSTALLED', 'Lossless Scaling Installed'));
       } else {
-        setDllDetectionStatus("Lossless Scaling Not Installed");
+        setDllDetectionStatus(t('STATUS_LOSSLESS_NOT_INSTALLED', 'Lossless Scaling Not Installed'));
       }
     } catch (error) {
-      setDllDetectionStatus("Lossless Scaling Not Installed");
+      setDllDetectionStatus(t('STATUS_LOSSLESS_NOT_INSTALLED', 'Lossless Scaling Not Installed'));
     }
   };
 
@@ -72,19 +75,31 @@ export function useDllDetection() {
 
 export function useLsfgConfig() {
   const [config, setConfig] = useState<ConfigurationData>(() => getDefaults());
+  const [runtimeV2, setRuntimeV2] = useState<boolean>(false);
+  // When the config cannot be read, the UI must show the error and withhold
+  // the editable controls instead of silently presenting default sliders.
+  // configLoaded stays false until the first successful read so the initial
+  // defaults never flash as editable state.
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configLoaded, setConfigLoaded] = useState<boolean>(false);
 
   const loadLsfgConfig = useCallback(async () => {
     try {
       const result = await getLsfgConfig();
+      setRuntimeV2(result.runtime_v2 === true);
       if (result.success && result.config) {
         setConfig(result.config);
+        setConfigError(null);
+        setConfigLoaded(true);
       } else {
-        console.log("lsfg config not available, using defaults:", result.error);
-        setConfig(getDefaults());
+        setConfigError(result.error || t('CONFIG_LOAD_FAILED', 'Failed to read the lsfg-vk configuration'));
+        setConfigLoaded(false);
       }
     } catch (error) {
       console.error("Error loading lsfg config:", error);
-      setConfig(getDefaults());
+      setRuntimeV2(false);
+      setConfigError(String(error));
+      setConfigLoaded(false);
     }
   }, []);
 
@@ -94,14 +109,11 @@ export function useLsfgConfig() {
       if (result.success) {
         setConfig(newConfig);
       } else {
-        showErrorToast(
-          ToastMessages.CONFIG_UPDATE_ERROR.title, 
-          result.error || ToastMessages.CONFIG_UPDATE_ERROR.body
-        );
+        showConfigUpdateErrorToast(result.error);
       }
       return result;
     } catch (error) {
-      showErrorToast(ToastMessages.CONFIG_UPDATE_ERROR.title, String(error));
+      showConfigUpdateErrorToast(String(error));
       return { success: false, error: String(error) };
     }
   }, []);
@@ -117,6 +129,9 @@ export function useLsfgConfig() {
 
   return {
     config,
+    runtimeV2,
+    configError,
+    configLoaded,
     setConfig,
     loadLsfgConfig,
     updateConfig,

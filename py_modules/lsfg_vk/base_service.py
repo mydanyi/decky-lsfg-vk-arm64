@@ -29,7 +29,10 @@ class BaseService:
         else:
             self.log = logger
             
-        self.user_home = Path.home()
+        # Decky provides the real user home; fall back to Path.home() for
+        # standalone/test usage where the attribute is absent or empty.
+        decky_user_home = getattr(decky, 'DECKY_USER_HOME', '')
+        self.user_home = Path(decky_user_home) if decky_user_home else Path.home()
         self.local_lib_dir = self.user_home / LOCAL_LIB
         self.local_share_dir = self.user_home / VULKAN_LAYER_DIR
         self.lsfg_script_path = self.user_home / SCRIPT_NAME

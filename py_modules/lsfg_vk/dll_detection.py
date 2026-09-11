@@ -5,19 +5,43 @@ DLL detection service for Lossless Scaling.
 import os
 import re
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from .base_service import BaseService
 from .constants import (
     ENV_LSFG_DLL_PATH, ENV_XDG_DATA_HOME, ENV_HOME,
-    STEAM_COMMON_PATH, LOSSLESS_DLL_NAME
+    STEAM_COMMON_PATH, LOSSLESS_DLL_NAME, LSFG_VK_DLL_NAME, JSON_FILENAME
 )
 from .types import DllDetectionResponse
+from . import runtime_v2
+
+# lsfg-vk 1.x and 2.0 need different DLLs and the two files are not
+# interchangeable: the 1.x layer loads Lossless.dll, the 2.0 layer loads
+# lsfg-vk.dll. Detection therefore follows the engine declared by the installed
+# layer manifest. Treating both names as always available would let a 1.x install
+# use the 2.0 DLL (and report the 2.0 engine as usable when only the 1.x DLL is
+# present).
 
 
 class DllDetectionService(BaseService):
-    """Service for detecting Lossless Scaling DLL"""
-    
+    """Service for detecting the DLL required by the installed lsfg-vk engine"""
+
+    def _engine_dll_name(self) -> str:
+        """Return the DLL filename required by the installed engine.
+
+        The engine is read from the installed layer manifest. Before the first
+        2.0 install there is no 2.0 manifest, so this reports the 1.x name and
+        existing x86 installs keep working unchanged.
+        """
+        if runtime_v2.is_v2_manifest(self.local_share_dir / JSON_FILENAME):
+            return LSFG_VK_DLL_NAME
+        return LOSSLESS_DLL_NAME
+
+    def _find_dll(self, directory: Path) -> Optional[Path]:
+        """Return the engine's DLL inside a directory, if it exists."""
+        candidate = directory / self._engine_dll_name()
+        return candidate if candidate.exists() else None
+
     def check_lossless_scaling_dll(self) -> DllDetectionResponse:
         """Check if Lossless Scaling DLL is available at the expected paths
         
@@ -75,15 +99,21 @@ class DllDetectionService(BaseService):
         dll_path = os.getenv(ENV_LSFG_DLL_PATH)
         if dll_path and dll_path.strip():
             dll_path_obj = Path(dll_path.strip())
+            expected_name = self._engine_dll_name()
             if dll_path_obj.exists():
-                self.log.info(f"Found DLL via {ENV_LSFG_DLL_PATH}: {dll_path_obj}")
-                return {
-                    "detected": True,
-                    "path": str(dll_path_obj),
-                    "source": f"{ENV_LSFG_DLL_PATH} environment variable",
-                    "message": None,
-                    "error": None
-                }
+                if dll_path_obj.name.lower() == expected_name.lower():
+                    self.log.info(f"Found DLL via {ENV_LSFG_DLL_PATH}: {dll_path_obj}")
+                    return {
+                        "detected": True,
+                        "path": str(dll_path_obj),
+                        "source": f"{ENV_LSFG_DLL_PATH} environment variable",
+                        "message": None,
+                        "error": None
+                    }
+                self.log.warning(
+                    f"Ignoring {ENV_LSFG_DLL_PATH}={dll_path_obj}: the installed "
+                    f"engine needs '{expected_name}'"
+                )
         return None
     
     def _check_xdg_data_home(self) -> DllDetectionResponse | None:
@@ -94,8 +124,8 @@ class DllDetectionService(BaseService):
         """
         data_dir = os.getenv(ENV_XDG_DATA_HOME)
         if data_dir and data_dir.strip():
-            dll_path = Path(data_dir.strip()) / "Steam" / STEAM_COMMON_PATH / LOSSLESS_DLL_NAME
-            if dll_path.exists():
+            dll_path = self._find_dll(Path(data_dir.strip()) / "Steam" / STEAM_COMMON_PATH)
+            if dll_path:
                 self.log.info(f"Found DLL via {ENV_XDG_DATA_HOME}: {dll_path}")
                 return {
                     "detected": True,
@@ -114,8 +144,8 @@ class DllDetectionService(BaseService):
         """
         home_dir = os.getenv(ENV_HOME)
         if home_dir and home_dir.strip():
-            dll_path = Path(home_dir.strip()) / ".local" / "share" / "Steam" / STEAM_COMMON_PATH / LOSSLESS_DLL_NAME
-            if dll_path.exists():
+            dll_path = self._find_dll(Path(home_dir.strip()) / ".local" / "share" / "Steam" / STEAM_COMMON_PATH)
+            if dll_path:
                 self.log.info(f"Found DLL via {ENV_HOME}/.local/share: {dll_path}")
                 return {
                     "detected": True,
@@ -138,8 +168,8 @@ class DllDetectionService(BaseService):
         steam_libraries = self._get_steam_library_paths()
         
         for library_path in steam_libraries:
-            dll_path = Path(library_path) / STEAM_COMMON_PATH / LOSSLESS_DLL_NAME
-            if dll_path.exists():
+            dll_path = self._find_dll(Path(library_path) / STEAM_COMMON_PATH)
+            if dll_path:
                 self.log.info(f"Found DLL in Steam library: {dll_path}")
                 return {
                     "detected": True,

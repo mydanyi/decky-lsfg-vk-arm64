@@ -1,92 +1,71 @@
-# Decky LSFG-VK
+# Decky LSFG-VK for ARM64
 
-> **Note:**  
-> This is an **unofficial community plugin**. It is independently developed and **not officially supported** by the creators of Lossless Scaling or lsfg-vk. For support, please use the [decky-lsfg-vk Discord Channel](https://discord.gg/TwvHdVucC3).
+I maintain this fork for **Armada on ARM64 handhelds**, based on [xXJSONDeruloXx/decky-lsfg-vk](https://github.com/xXJSONDeruloXx/decky-lsfg-vk) v0.12.8 (`e997a3f`). It is not an official Lossless Scaling, lsfg-vk, Armada or Decky release.
 
+**This repository contains plugin source, not the complete private test package.** The separately licensed modified native engine and commercial DLL are not published here. Cloning this repository does not provide a ready-to-install frame-generation runtime.
 
-<p align="center">
-   <img src="assets/decky-lossless-logo.png" alt="decky-lsfg-vk Logo" width="200"/>
-</p>
-<p align="center">
-   <a href="https://ko-fi.com/B0B71HZTAX" target="_blank" rel="noopener noreferrer">
-      <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi"/>
-   </a>
-</p>
+## What changed
 
+- Simplified Chinese UI, status messages and locale handling, with English retained.
+- lsfg-vk 2.0 runtime/profile translation and engine-specific DLL detection.
+- ARM64 installation handling, preservation of existing profiles, and automatic replacement of stale engines/launchers when a native payload is supplied.
+- Removal of obsolete 1.x presentation/HDR controls; a runtime explanation replaces them.
+- Base FPS slider up to 72, propagated to both DXVK and VKD3D; zero clears inherited caps.
+- Correct layer enable/disable behavior and cleanup of stale experimental environment variables.
+- Armada-compatible launch wrapping and a tested launch-option normalization utility.
+- Read/write failures remain visible instead of silently presenting editable default settings.
+- r5 removes automatic experimental paired pacing, preserves ordinary driver caps, and upgrades r4 launchers even when the native core is identical.
 
-## What is this?
+The Decky plugin identity remains unchanged intentionally, so upgrading replaces the existing plugin rather than creating a second entry.
 
-A Decky plugin that streamlines the installation of **lsfg-vk** ([Lossless Scaling Frame Generation Vulkan layer](https://github.com/PancakeTAS/lsfg-vk)) on Steam Deck, allowing you to use the Lossless Scaling frame generation features on Linux with a controller friendly UI in SteamOS, Bazzite, or any other Linux platform compatible with Decky Loader.
+## Physical-device validation
 
-## Installation
+I tested the private **r5** package on a **KONKR Pocket FIT Elite — SM8750 / Snapdragon 8 Elite / Adreno 830**, running Armada ARM64. On **2026-09-11**, I confirmed that the final in-game visual test passed. This was a real physical handheld, not an emulator.
 
-1. **Download the plugin** from the [releases tab](https://github.com/xXJSONDeruloXx/decky-lsfg-vk/releases)
-   - Download the "decky-lsfg-vk.zip" file to your Steam Deck
-2. **Install manually through Decky**:
-   - In Game Mode, go to the settings cog in the top right of the Decky Loader tab
-   - Enable "Developer Mode"
-   - Go to "Developer" tab and select "Install Plugin from Zip"
-   - Select the downloaded "decky-lsfg-vk.zip" file
+The r5 backend/launch suite passed 70 tests; its extracted private package passed 10 installation lifecycle tests. Ordinary game launch was checked after deployment. These results do not certify every game, other handhelds, or complete elimination of frametime outliers.
 
-## How to Use
+Experimental paired pacing remains disabled in the normal launcher. This fork does not implement adaptive frame generation, a minimum-input-FPS threshold, or NPU acceleration. See [r5 notes](docs/R5.md).
 
-1. **Purchase and install** [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) from Steam
-2. **Open the plugin** from the Decky menu
-3. **Click "Install lsfg-vk"** to automatically set up the lsfg-vk vulkan layer
-4. **Configure settings** using the plugin's UI - adjust FPS multiplier, flow scale, performance mode, HDR settings, and experimental features
-5. **Apply launch option** to games you want to use frame generation with:
-   - Add `~/lsfg %command%` to your game's launch options in Steam Properties
-   - Or use the "Launch Option Clipboard" button in the plugin to copy the command
-6. **Launch your game** - frame generation will activate automatically using your plugin configuration
+## Runtime requirements and installation boundary
 
-## Configuration Options
+- Armada ARM64 with a working Decky installation.
+- A compatible lsfg-vk 2.0 ARM64 runtime, obtained and used under its own license.
+- A legitimate Lossless Scaling installation and the matching `lsfg-vk.dll`. The old `Lossless.dll` is not interchangeable and must not simply be renamed.
 
-The plugin provides several configuration options to optimize frame generation for your games:
+For a locally assembled package, the installer expects the native engine at `bin/liblsfg-vk-v2-arm64.so`. This file is deliberately not tracked or downloaded by this fork. Without a supplied runtime payload, the source checkout alone cannot install the engine. Old automatic binary downloads have been removed so a build cannot silently bundle the legacy engine.
 
-### Core Settings
-- **FPS Multiplier**: Choose between 2x, 3x, or 4x frame generation
-- **Flow Scale**: Adjust motion estimation quality (lower = better performance, higher = better quality)
-- **Performance Mode**: Uses a lighter processing model - recommended for most games
-- **HDR Mode**: Enable for games that support HDR output
+On an Armada system with the default `armada` account, the game launch entry is:
 
-## Feedback and Support
+```text
+/var/home/armada/lsfg /usr/libexec/armada/armada-game-launch %command%
+```
 
-For per-game feedback and community support, please join the [decky-lsfg-vk Discord Channel](https://discord.gg/TwvHdVucC3)
+Use the plugin's copied launch options for a different user home. Preserve other game-specific arguments. Restart the game after changing base FPS or toggling frame generation. A setting is an upper limit, not a guarantee that the game reaches that rate.
 
-## Troubleshooting
+## Development
 
-**Frame generation not working?**
-- Ensure you've added `~/lsfg %command%` to your game's launch options
-- Check that the Lossless Scaling DLL was detected correctly in the plugin
-- Try enabling Performance Mode if you're experiencing crashes
-- Make sure your game is running in fullscreen mode for best results
+Use the committed lockfile; no dependency version changes are required by this fork. Frontend checks use the existing TypeScript dependency. Backend tests require Python 3.11+ and Bash on Linux.
 
-**Performance issues?**
-- Lower the Flow Scale setting for better performance
-- Enable Performance Mode (recommended for most games)
-- Try reducing the FPS multiplier from 4x to 2x or 3x
-- Consider using the experimental FPS limit feature for DirectX games
+```sh
+pnpm install --frozen-lockfile
+pnpm test
+pnpm exec tsc --noEmit
+pnpm build
+python3 -m unittest discover -s tests -v
+```
 
-## What it does
+The frontend build produces `dist/index.js`; it does not build or supply the separate native engine. No ready-to-install public release is provided by this source synchronization.
 
-The plugin:
-- Automatically downloads and installs the latest lsfg-vk Vulkan layer to `~/.local/lib/`
-- Configures the Vulkan layer in `~/.local/share/vulkan/implicit_layer.d/`
-- Creates a TOML configuration file in `~/.config/lsfg-vk/conf.toml` with your settings
-- Automatically detects your Lossless Scaling DLL installation
-- Provides an easy-to-use interface to configure frame generation settings:
-  - **FPS Multiplier**: Choose 2x, 3x, or 4x frame generation
-  - **Flow Scale**: Adjust motion estimation quality vs performance
-  - **Performance Mode**: Use lighter processing for better performance
-  - **HDR Mode**: Enable for HDR-compatible games
-  - **Experimental Features**: Override present mode and set FPS limits
-- **Hot-reloading**: Configuration changes apply immediately without restarting games
-- Easy uninstallation that removes all installed files when no longer needed
+## 中文说明
 
-## Credits
+这是我针对 Armada ARM64 掌机维护的适配分支，不只是汉化：还包含 2.0 配置适配、安装升级、限帧、开关及启动链修复。
 
-- **[PancakeTAS](https://github.com/PancakeTAS/lsfg-vk)** for creating the lsfg-vk Vulkan compatibility layer
-- **[Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/)** developers for the original frame generation technology
-- **[Deck Wizard](https://www.youtube.com/@DeckWizard)**  - Extensive community support including comprehensive guides, promotional content, thorough testing and feedback, custom artworks, and tutorial videos. His passionate advocacy and continuous support have been instrumental in this plugin's success.
-- The **Decky Loader** team for the plugin framework
-- Community contributors and testers for feedback and bug reports
+r5 已在 KONKR Pocket FIT Elite 真机完成我的画面验收。这里公开的是插件源码与测试，不包含修改版补帧核心、商业 DLL 或完整私人测试 ZIP，不能把 GitHub 的源码下载包当作可直接安装的插件包。
+
+## Attribution and licensing
+
+The plugin retains Kurt Himebauch's and the contributors' **BSD-3-Clause** license and notices; see [LICENSE](LICENSE). The [original README](docs/UPSTREAM-README.md) is retained as historical upstream documentation, not current instructions for this ARM64 fork.
+
+The separately developed lsfg-vk core has its own license. The 2.0 revision used in the private test carried **CC BY-NC-ND 4.0**; the plugin's BSD license does not grant permission to distribute modified core builds. Neither modified core source/binaries nor the proprietary Lossless Scaling DLL are included in this synchronization.
+
+Thanks to the original plugin authors, lsfg-vk contributors, Lossless Scaling developers, Decky Loader team, Armada contributors, and community testers. Please report issues specific to this fork in [this repository](https://github.com/mydanyi/decky-lsfg-vk-arm64/issues).

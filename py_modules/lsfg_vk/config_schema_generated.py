@@ -101,6 +101,9 @@ def get_script_generation_logic():
         dxvk_frame_rate = config.get("dxvk_frame_rate", 0)
         if dxvk_frame_rate > 0:
             lines.append(f"export DXVK_FRAME_RATE={dxvk_frame_rate}")
+            lines.append(f"export VKD3D_FRAME_RATE={dxvk_frame_rate}")
+        else:
+            lines.append("unset DXVK_FRAME_RATE VKD3D_FRAME_RATE")
         if config.get("enable_wow64", False):
             lines.append("export PROTON_USE_WOW64=1")
         if config.get("disable_steamdeck_mode", False):

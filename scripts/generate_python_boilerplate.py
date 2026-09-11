@@ -147,10 +147,13 @@ def generate_script_generation() -> str:
         elif field_type in [ConfigFieldType.INTEGER, ConfigFieldType.FLOAT]:
             default = field_def["default"]
             if field_name == "dxvk_frame_rate":
-                # Special handling for DXVK_FRAME_RATE (only export if > 0)
+                # Export DXVK_FRAME_RATE and VKD3D_FRAME_RATE if > 0; otherwise unset both.
                 lines.append(f'        {field_name} = config.get("{field_name}", {default})')
                 lines.append(f'        if {field_name} > 0:')
                 lines.append(f'            lines.append(f"export {env_var}={{{field_name}}}")')
+                lines.append(f'            lines.append(f"export VKD3D_FRAME_RATE={{{field_name}}}")')
+                lines.append('        else:')
+                lines.append('            lines.append("unset DXVK_FRAME_RATE VKD3D_FRAME_RATE")')
             else:
                 lines.append(f'        {field_name} = config.get("{field_name}", {default})')
                 lines.append(f'        if {field_name} != {default}:')

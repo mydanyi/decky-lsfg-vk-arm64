@@ -9,8 +9,9 @@ import traceback
 import zipfile
 import tempfile
 import json
+import filecmp
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from .base_service import BaseService
 from .constants import (
@@ -18,37 +19,68 @@ from .constants import (
     SO_EXT, JSON_EXT, ARM_LIB_FILENAME, ARMADA_DEVICE_ENV
 )
 from .config_schema import ConfigurationManager
+from . import runtime_v2
 from .types import InstallationResponse, UninstallationResponse, InstallationCheckResponse
 
 
 class InstallationService(BaseService):
     """Service for handling lsfg-vk installation and uninstallation"""
-    
+
     def __init__(self, logger=None):
         super().__init__(logger)
-        
+
         self.lib_file = self.local_lib_dir / LIB_FILENAME
         self.json_file = self.local_share_dir / JSON_FILENAME
-    
+        # Last installation failure, surfaced through the check API until a
+        # successful (manual) install retry clears it.
+        self.last_error: Optional[str] = None
+
+    def _bundled_native_binary(self) -> Optional[Path]:
+        """Return the bundled 2.0 native binary shipped with the plugin, if any."""
+        plugin_dir = Path(__file__).parent.parent.parent
+        native_v2 = plugin_dir / BIN_DIR / runtime_v2.ARM_BINARY
+        return native_v2 if native_v2.exists() else None
+
     def install(self) -> InstallationResponse:
         """Install lsfg-vk by extracting the zip file to ~/.local
-        
+
         Returns:
             InstallationResponse with success status and message/error
         """
         try:
+            native_v2 = self._bundled_native_binary()
+
+            if native_v2 is not None:
+                # The bundled native 2.0 binary is the only supported engine.
+                # Never fall through to the legacy zip engine, especially on a
+                # non-ARM host where the native binary cannot run.
+                if not self._is_arm_architecture():
+                    error_msg = (f"Bundled {runtime_v2.ARM_BINARY} requires an ARM64 host; "
+                                 "refusing to fall back to the legacy engine")
+                    self.log.error(error_msg)
+                    self.last_error = error_msg
+                    return self._error_response(InstallationResponse, error_msg, message="")
+
+                self._ensure_directories()
+                self._install_v2_files(native_v2)
+                self._create_config_file()
+                self._create_lsfg_launch_script()
+                self.last_error = None
+                return self._success_response(InstallationResponse, "Installed lsfg-vk 2.0.0 ARM64")
+
             plugin_dir = Path(__file__).parent.parent.parent
             zip_path = plugin_dir / BIN_DIR / ZIP_FILENAME
-            
+
             if not zip_path.exists():
                 error_msg = f"{ZIP_FILENAME} not found at {zip_path}"
                 self.log.error(error_msg)
+                self.last_error = error_msg
                 return self._error_response(InstallationResponse, error_msg, message="")
-            
+
             self._ensure_directories()
-            
+
             self._extract_and_install_files(zip_path)
-            
+
             # If on ARM, overwrite the .so with the ARM version
             if self._is_arm_architecture():
                 self.log.info("Detected ARM architecture, using ARM binary")
@@ -57,21 +89,31 @@ class InstallationService(BaseService):
                 self.log.info(f"Overwrote with ARM binary: {self.lib_file}")
 
             self._create_config_file()
-            
+
             self._create_lsfg_launch_script()
-            
+
+            self.last_error = None
             self.log.info("lsfg-vk installed successfully")
             return self._success_response(InstallationResponse, "lsfg-vk installed successfully")
-            
+
         except (OSError, zipfile.BadZipFile, shutil.Error) as e:
+            self.last_error = str(e)
             error_msg = f"Error installing lsfg-vk: {str(e)}"
             self.log.error(error_msg)
             return self._error_response(InstallationResponse, str(e), message="")
         except Exception as e:
+            self.last_error = str(e)
             error_msg = f"Unexpected error installing lsfg-vk: {str(e)}"
             self.log.error(error_msg)
             return self._error_response(InstallationResponse, str(e), message="")
     
+    def _install_v2_files(self, binary: Path) -> None:
+        # Replacing the inode leaves any already mapped library intact until game exit.
+        staged = self.lib_file.with_suffix('.so.new')
+        self._copy_plugin_file(binary, staged)
+        staged.replace(self.lib_file)
+        self._write_file(self.json_file, json.dumps(runtime_v2.manifest(self.lib_file), indent=2), 0o644)
+
     def _is_arm_architecture(self) -> bool:
         """Check if running on ARM architecture
 
@@ -203,10 +245,11 @@ class InstallationService(BaseService):
                 toml_content = ConfigurationManager.generate_toml_content_multi_profile(merged_profile_data)
                 
             except Exception as e:
-                self.log.warning(f"Failed to parse existing config file: {str(e)}, creating new one")
-                # Fall back to creating a new config file
-                config = ConfigurationManager.get_defaults_with_dll_detection(dll_service)
-                toml_content = ConfigurationManager.generate_toml_content(config)
+                # Never destroy a user config we failed to read: fail the
+                # install instead so the original file is preserved.
+                self.log.error(f"Failed to parse existing config file: {str(e)}; "
+                               "refusing to overwrite it")
+                raise
         else:
             # No existing config file, create a new one with defaults
             config = ConfigurationManager.get_defaults_with_dll_detection(dll_service)
@@ -240,9 +283,12 @@ class InstallationService(BaseService):
         config_service = ConfigurationService(logger=self.log)
         config_service.user_home = self.user_home
         config_service.lsfg_script_path = self.lsfg_launch_script_path
+        config_service.config_dir = self.config_dir
+        config_service.config_file_path = self.config_file_path
+        config_service.local_share_dir = self.local_share_dir
         
         # Generate script content with default configuration
-        script_content = config_service._generate_script_content(default_config)
+        script_content = config_service._generate_script_content_for_profile(config_service._get_profile_data())
         
         # Write the script file
         self._write_file(self.lsfg_launch_script_path, script_content, 0o755)
@@ -258,28 +304,54 @@ class InstallationService(BaseService):
 
     def check_installation(self) -> InstallationCheckResponse:
         """Check if lsfg-vk is already installed
-        
+
+        When the plugin ships a bundled 2.0 native binary, the check must not
+        accept a stale 1.x engine just because the files exist: the layer
+        manifest must be the 2.0 engine, the installed library must be byte
+        identical to the bundled binary, and the launcher plus generated
+        runtime configuration must exist.
+
         Returns:
             InstallationCheckResponse with installation status and file paths
         """
         try:
-            lib_exists = self.lib_file.exists()
-            json_exists = self.json_file.exists()
-            config_exists = self.config_file_path.exists()
-            
-            self.log.info(f"Installation check: lib={lib_exists}, json={json_exists}, config={config_exists}")
-            
+            lib_exists = self.lib_file.is_file()
+            json_exists = self.json_file.is_file()
+            config_exists = self.config_file_path.is_file()
+            launcher_exists = self.lsfg_launch_script_path.is_file()
+
+            installed = (lib_exists and json_exists and launcher_exists
+                         and config_exists and self.last_error is None)
+
+            bundled = self._bundled_native_binary()
+            if installed and bundled is not None:
+                runtime_config = self.config_dir / runtime_v2.RUNTIME_FILENAME
+                manifest = json.loads(self.json_file.read_text()) if json_exists else {}
+                installed = (
+                    runtime_v2.is_v2_manifest(self.json_file)
+                    and manifest.get('layer', {}).get('library_path') == str(self.lib_file)
+                    and filecmp.cmp(bundled, self.lib_file, shallow=False)
+                    and runtime_config.is_file()
+                    # r4 shipped the same core, but its launcher enabled the
+                    # regressing experimental scheduler and zeroed driver caps.
+                    and not any(line.strip().startswith('export LSFGVK_PACE_FPS=')
+                                for line in self.lsfg_launch_script_path.read_text().splitlines())
+                )
+
+            self.log.info(f"Installation check: lib={lib_exists}, json={json_exists}, "
+                          f"config={config_exists}, launcher={launcher_exists}, installed={installed}")
+
             return {
-                "installed": lib_exists and json_exists,
+                "installed": installed,
                 "lib_exists": lib_exists,
                 "json_exists": json_exists,
                 "script_exists": config_exists,  # Keep script_exists for backward compatibility
                 "lib_path": str(self.lib_file),
                 "json_path": str(self.json_file),
                 "script_path": str(self.config_file_path),  # Keep script_path for backward compatibility
-                "error": None
+                "error": None if installed else self.last_error
             }
-            
+
         except Exception as e:
             error_msg = f"Error checking lsfg-vk installation: {str(e)}"
             self.log.error(error_msg)

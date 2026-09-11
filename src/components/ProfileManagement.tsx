@@ -169,11 +169,11 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
         }
       } else {
         console.error("Failed to load profiles:", result.error);
-        showErrorToast("Failed to load profiles", result.error || "Unknown error");
+        showErrorToast(t('TOAST_PROFILE_LOAD_FAILED_TITLE', 'Failed to load profiles'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
       }
     } catch (error) {
       console.error("Error loading profiles:", error);
-      showErrorToast("Error loading profiles", String(error));
+      showErrorToast(t('TOAST_PROFILE_LOAD_ERROR_TITLE', 'Error loading profiles'), String(error));
     }
   };
 
@@ -183,15 +183,15 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
       const result: ProfileResult = await setCurrentProfile(profileName);
       if (result.success) {
         setSelectedProfile(profileName);
-        showSuccessToast("Profile switched", `Switched to profile: ${profileName}`);
+        showSuccessToast(t('TOAST_PROFILE_SWITCH_SUCCESS_TITLE', 'Profile switched'), `${t('TOAST_PROFILE_SWITCH_SUCCESS_BODY_PREFIX', 'Switched to profile:')} ${profileName}`);
         onProfileChange?.(profileName);
       } else {
         console.error("Failed to switch profile:", result.error);
-        showErrorToast("Failed to switch profile", result.error || "Unknown error");
+        showErrorToast(t('TOAST_PROFILE_SWITCH_FAILED_TITLE', 'Failed to switch profile'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
       }
     } catch (error) {
       console.error("Error switching profile:", error);
-      showErrorToast("Error switching profile", String(error));
+      showErrorToast(t('TOAST_PROFILE_SWITCH_ERROR_TITLE', 'Error switching profile'), String(error));
     } finally {
       setIsLoading(false);
     }
@@ -220,17 +220,17 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
       if (result.success) {
         // Use the normalized name returned from backend (spaces converted to dashes)
         const actualProfileName = result.profile_name || profileName;
-        showSuccessToast("Profile created", `Created profile: ${actualProfileName}`);
+        showSuccessToast(t('TOAST_PROFILE_CREATE_SUCCESS_TITLE', 'Profile created'), `${t('TOAST_PROFILE_CREATE_SUCCESS_BODY_PREFIX', 'Created profile:')} ${actualProfileName}`);
         await loadProfiles();
         // Automatically switch to the newly created profile using the normalized name
         await handleProfileChange(actualProfileName);
       } else {
         console.error("Failed to create profile:", result.error);
-        showErrorToast("Failed to create profile", result.error || "Unknown error");
+        showErrorToast(t('TOAST_PROFILE_CREATE_FAILED_TITLE', 'Failed to create profile'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
       }
     } catch (error) {
       console.error("Error creating profile:", error);
-      showErrorToast("Error creating profile", String(error));
+      showErrorToast(t('TOAST_PROFILE_CREATE_ERROR_TITLE', 'Error creating profile'), String(error));
     } finally {
       setIsLoading(false);
     }
@@ -258,18 +258,18 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
     try {
       const result: ProfileResult = await deleteProfile(selectedProfile);
       if (result.success) {
-        showSuccessToast("Profile deleted", `Deleted profile: ${selectedProfile}`);
+        showSuccessToast(t('TOAST_PROFILE_DELETE_SUCCESS_TITLE', 'Profile deleted'), `${t('TOAST_PROFILE_DELETE_SUCCESS_BODY_PREFIX', 'Deleted profile:')} ${selectedProfile}`);
         await loadProfiles();
         // If we deleted the current profile, it should have switched to default
         setSelectedProfile("decky-lsfg-vk");
         onProfileChange?.("decky-lsfg-vk");
       } else {
         console.error("Failed to delete profile:", result.error);
-        showErrorToast("Failed to delete profile", result.error || "Unknown error");
+        showErrorToast(t('TOAST_PROFILE_DELETE_FAILED_TITLE', 'Failed to delete profile'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
       }
     } catch (error) {
       console.error("Error deleting profile:", error);
-      showErrorToast("Error deleting profile", String(error));
+      showErrorToast(t('TOAST_PROFILE_DELETE_ERROR_TITLE', 'Error deleting profile'), String(error));
     } finally {
       setIsLoading(false);
     }
@@ -312,17 +312,17 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
       if (result.success) {
         // Use the normalized name returned from backend (spaces converted to dashes)
         const actualNewName = result.profile_name || newName;
-        showSuccessToast("Profile renamed", `Renamed profile to: ${actualNewName}`);
+        showSuccessToast(t('TOAST_PROFILE_RENAME_SUCCESS_TITLE', 'Profile renamed'), `${t('TOAST_PROFILE_RENAME_SUCCESS_BODY_PREFIX', 'Renamed profile to:')} ${actualNewName}`);
         await loadProfiles();
         setSelectedProfile(actualNewName);
         onProfileChange?.(actualNewName);
       } else {
         console.error("Failed to rename profile:", result.error);
-        showErrorToast("Failed to rename profile", result.error || "Unknown error");
+        showErrorToast(t('TOAST_PROFILE_RENAME_FAILED_TITLE', 'Failed to rename profile'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
       }
     } catch (error) {
       console.error("Error renaming profile:", error);
-      showErrorToast("Error renaming profile", String(error));
+      showErrorToast(t('TOAST_PROFILE_RENAME_ERROR_TITLE', 'Error renaming profile'), String(error));
     } finally {
       setIsLoading(false);
     }

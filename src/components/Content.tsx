@@ -9,10 +9,8 @@ import { ConfigurationSection } from "./ConfigurationSection";
 import { ProfileManagement } from "./ProfileManagement";
 import { UsageInstructions } from "./UsageInstructions";
 import { SmartClipboardButton } from "./SmartClipboardButton";
-import { FgmodClipboardButton } from "./FgmodClipboardButton";
 import { FpsMultiplierControl } from "./FpsMultiplierControl";
 import { NerdStuffModal } from "./NerdStuffModal";
-import { FlatpaksModal } from "./FlatpaksModal";
 import { ConfigurationData } from "../config/configSchema";
 import t from '../i18n/i18n';
 
@@ -28,6 +26,9 @@ export function Content() {
 
   const {
     config,
+    runtimeV2,
+    configError,
+    configLoaded,
     loadLsfgConfig,
     updateField
   } = useLsfgConfig();
@@ -70,8 +71,8 @@ export function Content() {
     showModal(<NerdStuffModal />);
   };
 
-  const handleShowFlatpaks = () => {
-    showModal(<FlatpaksModal />);
+  const handleRetryConfig = () => {
+    loadLsfgConfig();
   };
 
   return (
@@ -95,7 +96,35 @@ export function Content() {
         </>
       )}
 
-      {isInstalled && (
+      {isInstalled && configError && (
+        <PanelSectionRow>
+          <div
+            style={{
+              color: "#F44336",
+              fontSize: "12px",
+              lineHeight: "1.4",
+              marginBottom: "6px"
+            }}
+          >
+            {t('CONFIG_LOAD_FAILED_PREFIX', 'Configuration error:')} {configError}
+          </div>
+        </PanelSectionRow>
+      )}
+
+      {isInstalled && configError && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={handleRetryConfig}
+          >
+            {t('CONFIG_RETRY', 'Retry reading configuration')}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+
+      {/* Editable controls are withheld until a configuration read succeeds;
+          the retry button above and install/uninstall below stay available. */}
+      {isInstalled && configLoaded && !configError && (
         <>
           <PanelSectionRow>
             <div
@@ -117,10 +146,25 @@ export function Content() {
             config={config}
             onConfigChange={handleConfigChange}
           />
+
+          {runtimeV2 && (
+            <PanelSectionRow>
+              <div
+                style={{
+                  fontSize: "11px",
+                  lineHeight: "1.3",
+                  opacity: 0.7,
+                  textAlign: "center"
+                }}
+              >
+                {t('CONTENT_RUNTIME_V2', 'Runtime: lsfg-vk 2.0')}
+              </div>
+            </PanelSectionRow>
+          )}
         </>
       )}
 
-      {isInstalled && (
+      {isInstalled && configLoaded && !configError && (
         <ProfileManagement
           currentProfile={currentProfile}
           onProfileChange={async () => {
@@ -130,19 +174,14 @@ export function Content() {
         />
       )}
 
-      {isInstalled && (
+      {isInstalled && configLoaded && !configError && (
         <ConfigurationSection
           config={config}
           onConfigChange={handleConfigChange}
         />
       )}
 
-      {isInstalled && (
-        <>
-          <SmartClipboardButton />
-          <FgmodClipboardButton />
-        </>
-      )}
+      {isInstalled && configLoaded && !configError && <SmartClipboardButton />}
 
       <UsageInstructions />
 
@@ -155,14 +194,8 @@ export function Content() {
         </ButtonItem>
       </PanelSectionRow>
 
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={handleShowFlatpaks}
-        >
-          {t('CONTENT_FLATPAK_SETUP', 'Flatpak Setup')}
-        </ButtonItem>
-      </PanelSectionRow>
+      {/* DeckyFG (fgmod) and the Flatpak runtime extensions are 1.x-only and
+          have no place in the 2.0 UI, so they are removed entirely. */}
 
       {isInstalled && (
         <>

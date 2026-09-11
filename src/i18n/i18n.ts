@@ -2,38 +2,58 @@
 // to generate for localhost/dev, run `build_i18n_json.sh` script
 import * as languages from "./languages.json";
 
+type LanguageStrings = Record<string, string>;
+
+interface LanguageEntry {
+  name: string;
+  strings: LanguageStrings;
+}
+
+interface LanguageMetadataEntry {
+  name: string;
+}
+
+type LanguageBundle = Record<string, unknown>;
+type LanguageMetadata = Record<string, LanguageMetadataEntry>;
+
 const steamLanguageMap: Record<string, string> =
   languages.steam_language_map as Record<string, string>;
+
+// The JSON module exposes language ids (ko/en/ja/zh/...), the metadata block and
+// the raw template; index them dynamically through explicit record types instead
+// of relying on the inferred JSON shape.
+const languageBundles = languages as unknown as LanguageBundle;
+const languageMetadata = languages.language_metadata as LanguageMetadata;
 
 const normalizeLanguage = (language: string): string => {
   const normalized = language.trim().toLowerCase();
   return steamLanguageMap[normalized] ?? normalized;
 };
 
-function getLangs() {
-  const langs = languages.language_metadata;
+const isLanguageStrings = (value: unknown): value is LanguageStrings => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return Object.values(value as Record<string, unknown>).every(
+    (entry) => typeof entry === "string"
+  );
+};
 
-  Object.keys(languages).map((lang) => {
-    if (lang === "language_metadata" || lang == "steam_language_map") {
-      return;
-    }
-    const strs = languages[lang];
-    if (lang && strs && langs[lang]?.name) {
-      langs[lang].strings = strs;
-    }
+function getLangs(): Record<string, LanguageEntry> {
+  const langs: Record<string, LanguageEntry> = {};
+
+  Object.keys(languageMetadata).forEach((lang) => {
+    const bundle = languageBundles[lang];
+    langs[lang] = {
+      name: languageMetadata[lang].name,
+      strings: isLanguageStrings(bundle) ? bundle : {},
+    };
   });
 
   return langs;
 }
 
-export const LANGS: {
-  [key: string]: {
-    name: string;
-    strings: {
-      [key: string]: string;
-    };
-  };
-} = getLangs();
+export const LANGS: Record<string, LanguageEntry> = getLangs();
 
 let cachedLang: string | undefined;
 
@@ -47,7 +67,7 @@ export const getCurrentLanguage = (): string => {
 
 export const getLanguageName = (lang?: string): string => {
   const targetLang = normalizeLanguage(lang || getCurrentLanguage());
-  return LANGS[targetLang]?.name || targetLang;
+  return LANGS[targetLang]?.name ?? targetLang;
 };
 
 /**

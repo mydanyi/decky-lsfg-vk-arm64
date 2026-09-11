@@ -413,11 +413,29 @@ class Plugin:
     async def _main(self):
         """
         Main entry point for the plugin.
-        
+
         This method is called by Decky Loader when the plugin is loaded.
-        Any initialization code should go here.
+        Runs once per load, synchronously before the frontend talks to us:
+        when the bundled 2.0 runtime is not ready, install it from the plugin
+        payload. An explicit uninstall is never followed by an automatic
+        reinstall because _main only runs on plugin load.
         """
         decky.logger.info("decky-lsfg-vk plugin loaded")
+
+        try:
+            check = self.installation_service.check_installation()
+            if check.get("installed"):
+                decky.logger.info("lsfg-vk runtime is current; nothing to install")
+                return
+            decky.logger.info("lsfg-vk runtime not ready; installing bundled runtime")
+            result = self.installation_service.install()
+            if result.get("success"):
+                decky.logger.info(f"Auto-install succeeded: {result.get('message')}")
+            else:
+                decky.logger.error(f"Auto-install failed: {result.get('error')}")
+        except Exception as e:
+            self.installation_service.last_error = str(e)
+            decky.logger.error(f"Auto-install failed unexpectedly: {e}")
 
     async def _unload(self):
         """

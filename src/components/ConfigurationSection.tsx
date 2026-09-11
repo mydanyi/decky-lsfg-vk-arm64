@@ -3,8 +3,8 @@ import { useState, useEffect } from "react";
 import { RiArrowDownSFill, RiArrowUpSFill } from "react-icons/ri";
 import { ConfigurationData } from "../config/configSchema";
 import {
-  FLOW_SCALE, NO_FP16, PERFORMANCE_MODE, HDR_MODE,
-  EXPERIMENTAL_PRESENT_MODE, DXVK_FRAME_RATE, DISABLE_STEAMDECK_MODE,
+  FLOW_SCALE, NO_FP16, PERFORMANCE_MODE,
+  DXVK_FRAME_RATE, DISABLE_STEAMDECK_MODE,
   MANGOHUD_WORKAROUND, DISABLE_VKBASALT, FORCE_ENABLE_VKBASALT, ENABLE_WSI, ENABLE_ZINK
 } from "../config/generatedConfigSchema";
 import t from '../i18n/i18n';
@@ -115,6 +115,21 @@ export function ConfigurationSection({
       {!configCollapsed && (
         <>
           <PanelSectionRow>
+            <div
+              style={{
+                fontSize: "12px",
+                lineHeight: "1.4",
+                opacity: 0.8,
+                backgroundColor: "rgba(255, 255, 255, 0.1)",
+                padding: "8px",
+                borderRadius: "4px"
+              }}
+            >
+              {t('CONFIG_RUNTIME_V2_NOTE', 'lsfg-vk 2.0 runs frame generation with VSync/FIFO presentation. HDR is not managed here; it still depends on the game/system and the WSI configuration.')}
+            </div>
+          </PanelSectionRow>
+
+          <PanelSectionRow>
             <SliderField
               label={`${t('CONFIG_FLOW_SCALE', 'Flow Scale')} (${Math.round(config.flow_scale * 100)}%)`}
               description={t('CONFIG_FLOW_SCALE_DESC', 'Lowers internal motion estimation resolution, improving performance slightly')}
@@ -128,8 +143,8 @@ export function ConfigurationSection({
 
           <PanelSectionRow>
             <ToggleField
-              label="FP16 Acceleration"
-              description="Use FP16 shaders when supported"
+              label={t('CONFIG_FP16_ACCELERATION', 'FP16 Acceleration')}
+              description={t('CONFIG_FP16_ACCELERATION_DESC', 'Use FP16 shaders when supported')}
               checked={!config.no_fp16}
               onChange={(value) => onConfigChange(NO_FP16, !value)}
             />
@@ -141,20 +156,14 @@ export function ConfigurationSection({
               description={t('CONFIG_BASE_FPS_CAP_DESC', 'Base framerate cap for DirectX games, before frame multiplier. (Requires game restart to apply)')}
               value={config.dxvk_frame_rate}
               min={0}
-              max={60}
+              max={72}
               step={1}
               onChange={(value) => onConfigChange(DXVK_FRAME_RATE, value)}
             />
           </PanelSectionRow>
 
-          <PanelSectionRow>
-            <ToggleField
-              label={`${t('CONFIG_PRESENT_MODE', 'Present Mode')} (${(config.experimental_present_mode || "fifo") === "fifo" ? t('CONFIG_PRESENT_MODE_FIFO', 'FIFO - VSync') : t('CONFIG_PRESENT_MODE_MAILBOX', 'Mailbox')})`}
-              description={t('CONFIG_PRESENT_MODE_DESC', 'Toggle between FIFO - VSync (default) and Mailbox presentation modes for better performance or compatibility')}
-              checked={(config.experimental_present_mode || "fifo") === "fifo"}
-              onChange={(value) => onConfigChange(EXPERIMENTAL_PRESENT_MODE, value ? "fifo" : "mailbox")}
-            />
-          </PanelSectionRow>
+          {/* Present Mode and HDR Mode were 1.x-only controls; the 2.0 runtime
+              owns presentation and HDR, so they are gone entirely. */}
 
           <PanelSectionRow>
             <ToggleField
@@ -162,15 +171,6 @@ export function ConfigurationSection({
               description={t('CONFIG_PERFORMANCE_MODE_DESC', 'Uses a lighter model for FG (Recommended for most games)')}
               checked={config.performance_mode}
               onChange={(value) => onConfigChange(PERFORMANCE_MODE, value)}
-            />
-          </PanelSectionRow>
-
-          <PanelSectionRow>
-            <ToggleField
-              label={t('CONFIG_HDR_MODE', 'HDR Mode')}
-              description={t('CONFIG_HDR_MODE_DESC', 'Enables HDR mode (only for games that support HDR)')}
-              checked={config.hdr_mode}
-              onChange={(value) => onConfigChange(HDR_MODE, value)}
             />
           </PanelSectionRow>
         </>
