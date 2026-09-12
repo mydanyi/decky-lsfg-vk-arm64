@@ -102,6 +102,7 @@ def get_script_generation_logic():
         if dxvk_frame_rate > 0:
             lines.append(f"export DXVK_FRAME_RATE={dxvk_frame_rate}")
             lines.append(f"export VKD3D_FRAME_RATE={dxvk_frame_rate}")
+            lines.append('export DXVK_CONFIG="${DXVK_CONFIG-};dxgi.maxFrameRate=%s;d3d9.maxFrameRate=%s"' % (dxvk_frame_rate, dxvk_frame_rate))
         else:
             lines.append("unset DXVK_FRAME_RATE VKD3D_FRAME_RATE")
         if config.get("enable_wow64", False):
