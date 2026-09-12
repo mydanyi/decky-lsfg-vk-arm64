@@ -152,6 +152,7 @@ def generate_script_generation() -> str:
                 lines.append(f'        if {field_name} > 0:')
                 lines.append(f'            lines.append(f"export {env_var}={{{field_name}}}")')
                 lines.append(f'            lines.append(f"export VKD3D_FRAME_RATE={{{field_name}}}")')
+                lines.append('            lines.append(\'export DXVK_CONFIG="${DXVK_CONFIG-};dxgi.maxFrameRate=%s;d3d9.maxFrameRate=%s"\' % (dxvk_frame_rate, dxvk_frame_rate))')
                 lines.append('        else:')
                 lines.append('            lines.append("unset DXVK_FRAME_RATE VKD3D_FRAME_RATE")')
             else:
