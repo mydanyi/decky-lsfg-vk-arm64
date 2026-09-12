@@ -60,6 +60,13 @@ class AddEntryTests(unittest.TestCase):
 
 
 class NormaliseEntryTests(unittest.TestCase):
+    def test_explicit_conversion_replaces_pre_rename_launcher(self):
+        for entry in ('~/lsfg', '/var/home/armada/lsfg'):
+            with self.subTest(entry=entry):
+                result = unify_launch_options(f'{entry} %command%')
+                self.assertTrue(result['success'], result)
+                self.assertEqual(result['launch_options'], f'{CANONICAL} %command%')
+
     def test_replaces_official_entry_keeping_env_and_armada(self):
         options = f'ENABLE_GAMESCOPE_WSI=0 DXVK_HDR=0 {OFFICIAL_ENTRY} {ARMADA_LAUNCH} %command%'
         result = unify_launch_options(options)
@@ -79,7 +86,7 @@ class NormaliseEntryTests(unittest.TestCase):
         self.assertEqual(result['launch_options'], f'{CANONICAL} %command%')
 
     def test_recognises_relative_lsfg_alias(self):
-        result = unify_launch_options('~/lsfg %command%')
+        result = unify_launch_options('~/lsfg-arm64 %command%')
         self.assertTrue(result['success'], result)
         self.assertTrue(result['changed'])
         self.assertEqual(result['reason'], 'unified')
@@ -152,7 +159,7 @@ class RefusalTests(unittest.TestCase):
 
     def test_unknown_launcher_chain_is_refused(self):
         # fgmod is a 1.x-only wrapper; it cannot be canonicalised safely.
-        self.assert_refused('~/fgmod/fgmod ~/lsfg %command%', 'unsupported-launcher-chain')
+        self.assert_refused('~/fgmod/fgmod ~/lsfg-arm64 %command%', 'unsupported-launcher-chain')
 
     def test_unknown_argument_before_command_is_refused(self):
         self.assert_refused('-dx11 %command%', 'unsupported-launcher-chain')

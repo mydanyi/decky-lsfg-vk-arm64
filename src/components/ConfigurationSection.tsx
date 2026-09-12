@@ -14,8 +14,8 @@ interface ConfigurationSectionProps {
   onConfigChange: (fieldName: keyof ConfigurationData, value: boolean | number | string) => Promise<void>;
 }
 
-const WORKAROUNDS_COLLAPSED_KEY = "lsfg-workarounds-collapsed";
-const CONFIG_COLLAPSED_KEY = "lsfg-config-collapsed";
+const WORKAROUNDS_COLLAPSED_KEY = "lsfg-arm64-workarounds-collapsed";
+const CONFIG_COLLAPSED_KEY = "lsfg-arm64-config-collapsed";
 
 export function ConfigurationSection({
   config,
@@ -61,12 +61,12 @@ export function ConfigurationSection({
     <>
       <style>
         {`
-        .LSFG_ConfigCollapseButton_Container > div > div > div > button,
-        .LSFG_ConfigCollapseButton_Container > div > div > div > div > button,
-        .LSFG_WorkaroundsCollapseButton_Container > div > div > div > button {
+        .LSFG_ARM64_ConfigCollapseButton_Container > div > div > div > button,
+        .LSFG_ARM64_ConfigCollapseButton_Container > div > div > div > div > button,
+        .LSFG_ARM64_WorkaroundsCollapseButton_Container > div > div > div > button {
           height: 10px !important;
         }
-        .LSFG_WorkaroundsCollapseButton_Container > div > div > div > div > button {
+        .LSFG_ARM64_WorkaroundsCollapseButton_Container > div > div > div > div > button {
           height: 10px !important;
         }
         `}
@@ -91,7 +91,7 @@ export function ConfigurationSection({
 
       <PanelSectionRow>
         <div
-          className="LSFG_ConfigCollapseButton_Container"
+          className="LSFG_ARM64_ConfigCollapseButton_Container"
           style={{ marginTop: "-2px", marginBottom: "4px" }}
         >
           <ButtonItem
@@ -195,7 +195,7 @@ export function ConfigurationSection({
 
       <PanelSectionRow>
         <div
-          className="LSFG_WorkaroundsCollapseButton_Container"
+          className="LSFG_ARM64_WorkaroundsCollapseButton_Container"
           style={{ marginTop: "-2px", marginBottom: "4px" }}
         >
           <ButtonItem

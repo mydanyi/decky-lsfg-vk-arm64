@@ -1,11 +1,11 @@
 {
-  "name": "Decky LSFG-VK",
+  "name": "LSFG-VK ARM64",
   "author": "Kurt Himebauch (xXJSONDeruloXx)",
   "flags": [],
   "api_version": 1,
   "publish": {
     "tags": ["installer", "vulkan", "lsfg", "framegen", "lossless", "scaling"],
-    "description": "Enable lossless scaling frame generation on the Steam Deck using lsfg-vk compatibility layer.",
+    "description": "ARM64 coexistence fork of decky-lsfg-vk: lsfg-vk 2.0 frame generation for Armada handhelds, installable alongside the original plugin with its own config, launcher and Vulkan layer.",
     "image": "https://raw.githubusercontent.com/xXJSONDeruloXx/decky-lsfg-vk/refs/heads/main/assets/Decky_LSFG-VK_Master_1.png"
   }
 }

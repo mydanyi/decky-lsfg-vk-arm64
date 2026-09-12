@@ -48,7 +48,7 @@ export function UsageInstructions() {
         textAlign: "center"
           }}
         >
-          <strong>~/lsfg %command%</strong>
+          <strong>~/lsfg-arm64 %command%</strong>
         </div>
       </PanelSectionRow>
 
@@ -61,7 +61,9 @@ export function UsageInstructions() {
             marginTop: "8px"
           }}
         >
-          {t('USAGE_CONFIG_NOTE', 'The configuration is stored in ~/.config/lsfg-vk/conf.toml and hot-reloads while games are running.')}
+          {t('USAGE_COINSTALL_NOTE', 'Can be installed alongside the original plugin. Choose one launcher per game; settings and profiles stay separate.')}
+          <br />
+          {t('USAGE_CONFIG_NOTE', 'The configuration is stored in ~/.config/lsfg-vk-arm64/conf.toml and hot-reloads while games are running.')}
         </div>
       </PanelSectionRow>
     </>

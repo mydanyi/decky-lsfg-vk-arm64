@@ -2,12 +2,9 @@
 Installation service for lsfg-vk.
 """
 
-import os
 import platform
 import shutil
 import traceback
-import zipfile
-import tempfile
 import json
 import filecmp
 from pathlib import Path
@@ -15,8 +12,7 @@ from typing import Dict, Any, Optional
 
 from .base_service import BaseService
 from .constants import (
-    LIB_FILENAME, JSON_FILENAME, ZIP_FILENAME, BIN_DIR,
-    SO_EXT, JSON_EXT, ARM_LIB_FILENAME, ARMADA_DEVICE_ENV
+    LIB_FILENAME, JSON_FILENAME, BIN_DIR, ARMADA_DEVICE_ENV
 )
 from .config_schema import ConfigurationManager
 from . import runtime_v2
@@ -42,71 +38,38 @@ class InstallationService(BaseService):
         return native_v2 if native_v2.exists() else None
 
     def install(self) -> InstallationResponse:
-        """Install lsfg-vk by extracting the zip file to ~/.local
-
-        Returns:
-            InstallationResponse with success status and message/error
-        """
+        """Install the bundled lsfg-vk 2.0 ARM64 runtime to ~/.local."""
         try:
             native_v2 = self._bundled_native_binary()
-
-            if native_v2 is not None:
-                # The bundled native 2.0 binary is the only supported engine.
-                # Never fall through to the legacy zip engine, especially on a
-                # non-ARM host where the native binary cannot run.
-                if not self._is_arm_architecture():
-                    error_msg = (f"Bundled {runtime_v2.ARM_BINARY} requires an ARM64 host; "
-                                 "refusing to fall back to the legacy engine")
-                    self.log.error(error_msg)
-                    self.last_error = error_msg
-                    return self._error_response(InstallationResponse, error_msg, message="")
-
-                self._ensure_directories()
-                self._install_v2_files(native_v2)
-                self._create_config_file()
-                self._create_lsfg_launch_script()
-                self.last_error = None
-                return self._success_response(InstallationResponse, "Installed lsfg-vk 2.0.0 ARM64")
-
-            plugin_dir = Path(__file__).parent.parent.parent
-            zip_path = plugin_dir / BIN_DIR / ZIP_FILENAME
-
-            if not zip_path.exists():
-                error_msg = f"{ZIP_FILENAME} not found at {zip_path}"
+            if native_v2 is None:
+                error_msg = (f"Missing ARM64 native payload: {BIN_DIR}/{runtime_v2.ARM_BINARY} "
+                             "was not found in the plugin package. The legacy ZIP engine is "
+                             "not supported; supply the ARM64 runtime payload and retry.")
                 self.log.error(error_msg)
                 self.last_error = error_msg
                 return self._error_response(InstallationResponse, error_msg, message="")
-
+            if not self._is_arm_architecture():
+                error_msg = (f"Bundled {runtime_v2.ARM_BINARY} requires an ARM64 host; "
+                             "refusing to install on this architecture")
+                self.log.error(error_msg)
+                self.last_error = error_msg
+                return self._error_response(InstallationResponse, error_msg, message="")
             self._ensure_directories()
-
-            self._extract_and_install_files(zip_path)
-
-            # If on ARM, overwrite the .so with the ARM version
-            if self._is_arm_architecture():
-                self.log.info("Detected ARM architecture, using ARM binary")
-                arm_so_path = plugin_dir / BIN_DIR / ARM_LIB_FILENAME
-                self._copy_plugin_file(arm_so_path, self.lib_file)
-                self.log.info(f"Overwrote with ARM binary: {self.lib_file}")
-
+            self._install_v2_files(native_v2)
             self._create_config_file()
-
             self._create_lsfg_launch_script()
-
             self.last_error = None
-            self.log.info("lsfg-vk installed successfully")
-            return self._success_response(InstallationResponse, "lsfg-vk installed successfully")
-
-        except (OSError, zipfile.BadZipFile, shutil.Error) as e:
+            self.log.info("lsfg-vk 2.0.0 ARM64 installed successfully")
+            return self._success_response(InstallationResponse, "Installed lsfg-vk 2.0.0 ARM64")
+        except (OSError, shutil.Error) as e:
             self.last_error = str(e)
-            error_msg = f"Error installing lsfg-vk: {str(e)}"
-            self.log.error(error_msg)
+            self.log.error(f"Error installing lsfg-vk: {e}")
             return self._error_response(InstallationResponse, str(e), message="")
         except Exception as e:
             self.last_error = str(e)
-            error_msg = f"Unexpected error installing lsfg-vk: {str(e)}"
-            self.log.error(error_msg)
+            self.log.error(f"Unexpected error installing lsfg-vk: {e}")
             return self._error_response(InstallationResponse, str(e), message="")
-    
+
     def _install_v2_files(self, binary: Path) -> None:
         # Replacing the inode leaves any already mapped library intact until game exit.
         staged = self.lib_file.with_suffix('.so.new')
@@ -150,77 +113,8 @@ class InstallationService(BaseService):
         shutil.copyfile(src_file, dst_file)
         dst_file.chmod(0o644)
 
-    def _extract_and_install_files(self, zip_path: Path) -> None:
-        """Extract zip file and install files to appropriate locations
-        
-        Args:
-            zip_path: Path to the zip file to extract
-            
-        Raises:
-            zipfile.BadZipFile: If zip file is corrupted
-            OSError: If file operations fail
-        """
-        # Destination mapping for file types
-        dest_map = {
-            SO_EXT: self.local_lib_dir,
-            JSON_EXT: self.local_share_dir
-        }
-        
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-                zip_ref.extractall(temp_path)
-                
-                # Process extracted files
-                for root, dirs, files in os.walk(temp_path):
-                    root_path = Path(root)
-                    for file in files:
-                        src_file = root_path / file
-                        file_path = Path(file)
-                        
-                        # Check if we know where this file type should go
-                        dst_dir = dest_map.get(file_path.suffix)
-                        if dst_dir:
-                            dst_file = dst_dir / file
-                            
-                            # Special handling for JSON files - need to modify library_path
-                            if file_path.suffix == JSON_EXT and file == JSON_FILENAME:
-                                self._copy_and_fix_json_file(src_file, dst_file)
-                            else:
-                                self._copy_plugin_file(src_file, dst_file)
-                            
-                            self.log.info(f"Copied {file} to {dst_file}")
-    
-    def _copy_and_fix_json_file(self, src_file: Path, dst_file: Path) -> None:
-        """Copy JSON file and fix the library_path to use relative path
-        
-        Args:
-            src_file: Source JSON file path
-            dst_file: Destination JSON file path
-        """
-        try:
-            # Read the JSON file
-            with open(src_file, 'r') as f:
-                json_data = json.load(f)
-            
-            # Fix the library_path from "liblsfg-vk.so" to "../../../lib/liblsfg-vk.so"
-            if 'layer' in json_data and 'library_path' in json_data['layer']:
-                current_path = json_data['layer']['library_path']
-                if current_path == "liblsfg-vk.so":
-                    json_data['layer']['library_path'] = "../../../lib/liblsfg-vk.so"
-                    self.log.info(f"Fixed library_path from '{current_path}' to '../../../lib/liblsfg-vk.so'")
-            
-            # Write the modified JSON file
-            with open(dst_file, 'w') as f:
-                json.dump(json_data, f, indent=2)
-                
-        except (json.JSONDecodeError, KeyError, OSError) as e:
-            self.log.error(f"Error fixing JSON file {src_file}: {e}")
-            # Fallback to simple copy if JSON modification fails
-            self._copy_plugin_file(src_file, dst_file)
-    
     def _create_config_file(self) -> None:
-        """Create or update the TOML config file in ~/.config/lsfg-vk with default configuration and detected DLL path
+        """Create or update the TOML config file in ~/.config/lsfg-vk-arm64 with default configuration and detected DLL path
         
         If a config file already exists, preserve existing profiles and only update global settings like DLL path.
         """
@@ -273,7 +167,7 @@ class InstallationService(BaseService):
             self.log.debug(f"Could not log DLL path: {e}")
     
     def _create_lsfg_launch_script(self) -> None:
-        """Create the ~/lsfg launch script for easier game setup"""
+        """Create the ~/lsfg-arm64 launch script for easier game setup"""
         # Use the default configuration for the initial script
         from .config_schema import ConfigurationManager
         default_config = ConfigurationManager.get_defaults()
@@ -324,13 +218,17 @@ class InstallationService(BaseService):
                          and config_exists and self.last_error is None)
 
             bundled = self._bundled_native_binary()
-            if installed and bundled is not None:
+            if installed:
                 runtime_config = self.config_dir / runtime_v2.RUNTIME_FILENAME
                 manifest = json.loads(self.json_file.read_text()) if json_exists else {}
+                layer = manifest.get('layer', {})
                 installed = (
                     runtime_v2.is_v2_manifest(self.json_file)
-                    and manifest.get('layer', {}).get('library_path') == str(self.lib_file)
-                    and filecmp.cmp(bundled, self.lib_file, shallow=False)
+                    # Owned manifest contract only; obsolete own manifests rejected.
+                    and layer.get('enable_environment') == {'ENABLE_LSFGVK_ARM64': '1'}
+                    and layer.get('disable_environment') == {'DISABLE_LSFGVK': '1'}
+                    and layer.get('library_path') == str(self.lib_file)
+                    and (bundled is None or filecmp.cmp(bundled, self.lib_file, shallow=False))
                     and runtime_config.is_file()
                     # r4 shipped the same core, but its launcher enabled the
                     # regressing experimental scheduler and zeroed driver caps.
@@ -383,9 +281,7 @@ class InstallationService(BaseService):
                 if self._remove_if_exists(file_path):
                     removed_files.append(str(file_path))
             
-            # Also try to remove the old script file if it exists (for backward compatibility)
-            if self._remove_if_exists(self.lsfg_script_path):
-                removed_files.append(str(self.lsfg_script_path))
+            # Coexistence: never remove the original plugin's ~/lsfg script.
             
             # Don't remove config directory since we're preserving the config file
             
@@ -416,11 +312,10 @@ class InstallationService(BaseService):
             self.log.info(f"  JSON file: {self.json_file}")
             self.log.info(f"  Config file: {self.config_file_path} (preserved)")
             self.log.info(f"  Launch script: {self.lsfg_launch_script_path}")
-            self.log.info(f"  Old script file: {self.lsfg_script_path}")
             
             removed_files = []
             # Remove core lsfg-vk files, but preserve config file to maintain user's custom profiles
-            files_to_remove = [self.lib_file, self.json_file, self.lsfg_launch_script_path, self.lsfg_script_path]
+            files_to_remove = [self.lib_file, self.json_file, self.lsfg_launch_script_path]
             
             for file_path in files_to_remove:
                 try:
@@ -466,7 +361,7 @@ class InstallationService(BaseService):
         
         # Start with existing data
         merged_data: ProfileData = {
-            "current_profile": existing_profile_data.get("current_profile", "decky-lsfg-vk"),
+            "current_profile": existing_profile_data.get("current_profile", "decky-lsfg-vk-arm64"),
             "global_config": existing_profile_data.get("global_config", {}).copy(),
             "profiles": {}
         }
@@ -505,11 +400,11 @@ class InstallationService(BaseService):
         
         # If no profiles exist, create the default one
         if not merged_data["profiles"]:
-            merged_data["profiles"]["decky-lsfg-vk"] = {
+            merged_data["profiles"]["decky-lsfg-vk-arm64"] = {
                 k: v for k, v in default_config.items() 
                 if k not in ["dll", "no_fp16"]  # Exclude global fields
             }
-            merged_data["current_profile"] = "decky-lsfg-vk"
+            merged_data["current_profile"] = "decky-lsfg-vk-arm64"
             self.log.info("No existing profiles found, created default profile")
         
         return merged_data

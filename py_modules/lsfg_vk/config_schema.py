@@ -72,7 +72,7 @@ SCRIPT_ONLY_FIELDS = {
 COMPLETE_CONFIG_SCHEMA = {**CONFIG_SCHEMA, **SCRIPT_ONLY_FIELDS}
 
 # Constants for profile management
-DEFAULT_PROFILE_NAME = "decky-lsfg-vk"
+DEFAULT_PROFILE_NAME = "decky-lsfg-vk-arm64"
 GLOBAL_SECTION_FIELDS = {"dll", "no_fp16"}
 
 # Note: ConfigurationData is now imported from generated file

@@ -1,11 +1,11 @@
 """Pure helpers for adding/normalising the unified LSFG launch option.
 
 On the ARM64 Armada image the plugin's launch script lives at
-``/var/home/armada/lsfg`` and the host game wrapper is
+``/var/home/armada/lsfg-arm64`` and the host game wrapper is
 ``/usr/libexec/armada/armada-game-launch``. Every game that uses frame
 generation needs both, exactly once, in front of ``%command%``::
 
-    <env assignments> /var/home/armada/lsfg /usr/libexec/armada/armada-game-launch %command% <args>
+    <env assignments> /var/home/armada/lsfg-arm64 /usr/libexec/armada/armada-game-launch %command% <args>
 
 The functions in this module are pure: they never read or write files and do
 not inspect the environment, which keeps them trivially testable and safe to
@@ -15,10 +15,12 @@ call from a review tool.
 import re
 
 #: Canonical launch-script entry on the Armada ARM64 image.
-UNIFIED_ENTRY = '/var/home/armada/lsfg'
+UNIFIED_ENTRY = '/var/home/armada/lsfg-arm64'
 
-#: Older, relative spelling of the same entry.
-UNIFIED_ENTRY_ALIAS = '~/lsfg'
+#: Relative spelling of this fork's entry.
+UNIFIED_ENTRY_ALIAS = '~/lsfg-arm64'
+#: Invoking this utility explicitly converts pre-rename launchers.
+LEGACY_UNIFIED_ENTRIES = ('/var/home/armada/lsfg', '~/lsfg')
 
 #: Armada's host game wrapper, kept exactly once in the command chain.
 ARMADA_LAUNCH = '/usr/libexec/armada/armada-game-launch'
@@ -31,7 +33,7 @@ KNOWN_LEGACY_ENTRIES = (
 )
 
 #: Every token that counts as "the LSFG entry is already here".
-LSFG_ALIASES = (UNIFIED_ENTRY, UNIFIED_ENTRY_ALIAS) + KNOWN_LEGACY_ENTRIES
+LSFG_ALIASES = (UNIFIED_ENTRY, UNIFIED_ENTRY_ALIAS) + LEGACY_UNIFIED_ENTRIES + KNOWN_LEGACY_ENTRIES
 
 COMMAND_PLACEHOLDER = '%command%'
 

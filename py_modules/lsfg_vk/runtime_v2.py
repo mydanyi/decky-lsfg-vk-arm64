@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import shlex
 
-LAYER_NAME = 'VK_LAYER_LSFGVK_frame_generation'
+LAYER_NAME = 'VK_LAYER_LSFGVK_ARM64_frame_generation'
 ARM_BINARY = 'liblsfg-vk-v2-arm64.so'
 RUNTIME_FILENAME = 'decky-v2.toml'
 RUNTIME_PROFILE = 'decky-active'
@@ -57,19 +57,25 @@ def launch_lines(config: dict, path: Path) -> list[str]:
         'unset LSFGVK_DLL_PATH LSFGVK_NO_FP16 LSFGVK_PACING_MODE LSFGVK_OVERRIDE_PRESENT_MODE',
         'unset LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT LSFGVK_LOG_FILE LSFGVK_LOG_LEVEL',
         'unset LSFGVK_PACE_FPS LSFGVK_TIMING_TRIGGER',
+        # Coexistence: never inherit the original plugin's enable flag or
+        # legacy process selector; disable upstream layers, keep other entries.
+        'unset ENABLE_LSFGVK LSFG_PROCESS',
         'export DISABLE_LSFG=1',
+        'export VK_LOADER_LAYERS_DISABLE='
+        '"${VK_LOADER_LAYERS_DISABLE:+$VK_LOADER_LAYERS_DISABLE,}'
+        'VK_LAYER_LS_frame_generation,VK_LAYER_LSFGVK_frame_generation"',
     ]
     if is_enabled(config):
         # Only the enable flag is set when active; DISABLE_LSFGVK must be absent
         # because the Vulkan loader disables the layer whenever that variable is
         # set to any value, including "0".
         lines.append('unset DISABLE_LSFGVK')
-        lines.append('export ENABLE_LSFGVK=1')
+        lines.append('export ENABLE_LSFGVK_ARM64=1')
     else:
-        # When frame generation is off, inject nothing: leave ENABLE_LSFGVK
+        # When frame generation is off, inject nothing: leave ENABLE_LSFGVK_ARM64
         # unset so the loader never loads the layer, and keep DISABLE_LSFGVK as
         # a belt-and-braces guard.
-        lines.append('unset ENABLE_LSFGVK')
+        lines.append('unset ENABLE_LSFGVK_ARM64')
         lines.append('export DISABLE_LSFGVK=1')
     lines.extend([
         f'export LSFGVK_CONFIG={shlex.quote(str(path))}',
@@ -89,6 +95,8 @@ def manifest(library: Path) -> dict:
         'name': LAYER_NAME, 'description': 'Lossless Scaling frame generation layer',
         'implementation_version': '2', 'library_path': str(library),
         'type': 'GLOBAL', 'api_version': '1.4.350',
-        'enable_environment': {'ENABLE_LSFGVK': '1'},
+        'enable_environment': {'ENABLE_LSFGVK_ARM64': '1'},
+        # The unchanged native core uses this guard for its internal Vulkan
+        # instance. Keep it shared to prevent recursive layer loading.
         'disable_environment': {'DISABLE_LSFGVK': '1'},
     }}

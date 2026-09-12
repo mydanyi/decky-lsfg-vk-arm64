@@ -10,32 +10,24 @@ from typing import Dict, Any, List, Optional
 from .base_service import BaseService
 from .constants import (
     ENV_LSFG_DLL_PATH, ENV_XDG_DATA_HOME, ENV_HOME,
-    STEAM_COMMON_PATH, LOSSLESS_DLL_NAME, LSFG_VK_DLL_NAME, JSON_FILENAME
+    STEAM_COMMON_PATH, LSFG_VK_DLL_NAME
 )
 from .types import DllDetectionResponse
-from . import runtime_v2
 
-# lsfg-vk 1.x and 2.0 need different DLLs and the two files are not
-# interchangeable: the 1.x layer loads Lossless.dll, the 2.0 layer loads
-# lsfg-vk.dll. Detection therefore follows the engine declared by the installed
-# layer manifest. Treating both names as always available would let a 1.x install
-# use the 2.0 DLL (and report the 2.0 engine as usable when only the 1.x DLL is
-# present).
+# This fork requires the 2.0 engine's lsfg-vk.dll. The original plugin's
+# Lossless.dll and layer manifest do not determine this fork's DLL selection.
 
 
 class DllDetectionService(BaseService):
     """Service for detecting the DLL required by the installed lsfg-vk engine"""
 
     def _engine_dll_name(self) -> str:
-        """Return the DLL filename required by the installed engine.
+        """Return the DLL filename required by this v2-only fork.
 
-        The engine is read from the installed layer manifest. Before the first
-        2.0 install there is no 2.0 manifest, so this reports the 1.x name and
-        existing x86 installs keep working unchanged.
+        Detection always expects lsfg-vk.dll, including before the first
+        install; the original plugin's manifest is never consulted.
         """
-        if runtime_v2.is_v2_manifest(self.local_share_dir / JSON_FILENAME):
-            return LSFG_VK_DLL_NAME
-        return LOSSLESS_DLL_NAME
+        return LSFG_VK_DLL_NAME
 
     def _find_dll(self, directory: Path) -> Optional[Path]:
         """Return the engine's DLL inside a directory, if it exists."""
