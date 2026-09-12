@@ -27,7 +27,7 @@ import {
 import { showSuccessToast, showErrorToast } from "../utils/toastUtils";
 import t from '../i18n/i18n';
 
-const PROFILES_COLLAPSED_KEY = 'lsfg-profiles-collapsed';
+const PROFILES_COLLAPSED_KEY = 'lsfg-arm64-profiles-collapsed';
 
 interface TextInputModalProps {
   title: string;
@@ -108,7 +108,7 @@ interface ProfileManagementProps {
 
 export function ProfileManagement({ currentProfile, onProfileChange }: ProfileManagementProps) {
   const [profiles, setProfiles] = useState<string[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState<string>(currentProfile || "decky-lsfg-vk");
+  const [selectedProfile, setSelectedProfile] = useState<string>(currentProfile || "decky-lsfg-vk-arm64");
   const [isLoading, setIsLoading] = useState(false);
   const [mainRunningApp, setMainRunningApp] = useState<AppOverview | undefined>(undefined);
   
@@ -237,7 +237,7 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
   };
 
   const handleDeleteProfile = () => {
-    if (selectedProfile === "decky-lsfg-vk") {
+    if (selectedProfile === "decky-lsfg-vk-arm64") {
       showErrorToast(t('PROFILE_CANNOT_DELETE_TITLE', 'Cannot delete default profile'), t('PROFILE_CANNOT_DELETE_MSG', 'The default profile cannot be deleted'));
       return;
     }
@@ -261,8 +261,8 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
         showSuccessToast(t('TOAST_PROFILE_DELETE_SUCCESS_TITLE', 'Profile deleted'), `${t('TOAST_PROFILE_DELETE_SUCCESS_BODY_PREFIX', 'Deleted profile:')} ${selectedProfile}`);
         await loadProfiles();
         // If we deleted the current profile, it should have switched to default
-        setSelectedProfile("decky-lsfg-vk");
-        onProfileChange?.("decky-lsfg-vk");
+        setSelectedProfile("decky-lsfg-vk-arm64");
+        onProfileChange?.("decky-lsfg-vk-arm64");
       } else {
         console.error("Failed to delete profile:", result.error);
         showErrorToast(t('TOAST_PROFILE_DELETE_FAILED_TITLE', 'Failed to delete profile'), result.error || t('TOAST_UNKNOWN_ERROR', 'Unknown error occurred'));
@@ -284,7 +284,7 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
   };
 
   const handleRenameProfile = () => {
-    if (selectedProfile === "decky-lsfg-vk") {
+    if (selectedProfile === "decky-lsfg-vk-arm64") {
       showErrorToast(t('PROFILE_CANNOT_RENAME_TITLE', 'Cannot rename default profile'), t('PROFILE_CANNOT_RENAME_MSG', 'The default profile cannot be renamed'));
       return;
     }
@@ -331,7 +331,7 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
   const profileOptions: DropdownOption[] = [
     ...profiles.map((profile: string) => ({
       data: profile,
-      label: profile === "decky-lsfg-vk" ? t('PROFILE_DEFAULT', 'Default') : profile
+      label: profile === "decky-lsfg-vk-arm64" ? t('PROFILE_DEFAULT', 'Default') : profile
     })),
     {
       data: "__NEW_PROFILE__",
@@ -343,10 +343,10 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
     <>
       <style>
         {`
-        .LSFG_ProfilesCollapseButton_Container > div > div > div > button {
+        .LSFG_ARM64_ProfilesCollapseButton_Container > div > div > div > button {
           height: 10px !important;
         }
-        .LSFG_ProfilesCollapseButton_Container > div > div > div > div > button {
+        .LSFG_ARM64_ProfilesCollapseButton_Container > div > div > div > div > button {
           height: 10px !important;
         }
         `}
@@ -379,13 +379,13 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
             color: "white"
           }}
         >
-          {t('PROFILE_SECTION_TITLE', 'Profile:')} {selectedProfile === "decky-lsfg-vk" ? t('PROFILE_DEFAULT', 'Default') : selectedProfile}
+          {t('PROFILE_SECTION_TITLE', 'Profile:')} {selectedProfile === "decky-lsfg-vk-arm64" ? t('PROFILE_DEFAULT', 'Default') : selectedProfile}
         </div>
       </PanelSectionRow>
 
       <PanelSectionRow>
         <div
-          className="LSFG_ProfilesCollapseButton_Container"
+          className="LSFG_ARM64_ProfilesCollapseButton_Container"
           style={{ marginTop: "-2px", marginBottom: "4px" }}
         >
           <ButtonItem
@@ -448,7 +448,7 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
                   minWidth: "0",
                 }}
                 onClick={handleRenameProfile}
-                disabled={isLoading || selectedProfile === "decky-lsfg-vk" || !!mainRunningApp}
+                disabled={isLoading || selectedProfile === "decky-lsfg-vk-arm64" || !!mainRunningApp}
               >
                 <RiEditLine size={20} />
               </DialogButton>
@@ -464,7 +464,7 @@ export function ProfileManagement({ currentProfile, onProfileChange }: ProfileMa
                   minWidth: "0",
                 }}
                 onClick={handleDeleteProfile}
-                disabled={isLoading || selectedProfile === "decky-lsfg-vk" || !!mainRunningApp}
+                disabled={isLoading || selectedProfile === "decky-lsfg-vk-arm64" || !!mainRunningApp}
               >
                 <RiDeleteBinLine size={20} />
               </DialogButton>

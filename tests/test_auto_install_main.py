@@ -103,13 +103,13 @@ class AutoInstallTestBase(unittest.TestCase):
         return (base or self.home) / VULKAN_LAYER_DIR / JSON_FILENAME
 
     def conf_path(self, base=None):
-        return (base or self.home) / '.config/lsfg-vk' / CONFIG_FILENAME
+        return (base or self.home) / '.config/lsfg-vk-arm64' / CONFIG_FILENAME
 
     def runtime_path(self, base=None):
-        return (base or self.home) / '.config/lsfg-vk' / runtime_v2.RUNTIME_FILENAME
+        return (base or self.home) / '.config/lsfg-vk-arm64' / runtime_v2.RUNTIME_FILENAME
 
     def launcher_path(self, base=None):
-        return (base or self.home) / 'lsfg'
+        return (base or self.home) / 'lsfg-arm64'
 
 
 class FreshStartupAutoInstallTests(AutoInstallTestBase):
@@ -173,7 +173,7 @@ class LegacyEngineUpgradeTests(AutoInstallTestBase):
             'current_profile': 'my-game',
             'profiles': {
                 'my-game': dict(ConfigurationManager.get_defaults(), multiplier=3, flow_scale=0.6),
-                'decky-lsfg-vk': ConfigurationManager.get_defaults(),
+                'decky-lsfg-vk-arm64': ConfigurationManager.get_defaults(),
             },
             'global_config': {'dll': '/custom/Lossless.dll', 'no_fp16': True},
         }
@@ -330,8 +330,8 @@ class ManualRetryErrorSurfacingTests(AutoInstallTestBase):
         # Restoring a readable config lets the manual retry succeed and clears
         # the stored error.
         profile_data = {
-            'current_profile': 'decky-lsfg-vk',
-            'profiles': {'decky-lsfg-vk': ConfigurationManager.get_defaults()},
+            'current_profile': 'decky-lsfg-vk-arm64',
+            'profiles': {'decky-lsfg-vk-arm64': ConfigurationManager.get_defaults()},
             'global_config': {'dll': '', 'no_fp16': False},
         }
         self.conf_path().write_text(
@@ -377,7 +377,7 @@ class UninstallReinstallFlowTests(AutoInstallTestBase):
             'current_profile': 'my-game',
             'profiles': {
                 'my-game': dict(ConfigurationManager.get_defaults(), multiplier=3, flow_scale=0.6),
-                'decky-lsfg-vk': ConfigurationManager.get_defaults(),
+                'decky-lsfg-vk-arm64': ConfigurationManager.get_defaults(),
             },
             'global_config': {'dll': '/custom/Lossless.dll', 'no_fp16': True},
         }

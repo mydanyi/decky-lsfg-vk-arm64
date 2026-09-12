@@ -7,12 +7,12 @@ from pathlib import Path
 LOCAL_LIB = ".local/lib"
 LOCAL_SHARE_BASE = ".local/share"
 VULKAN_LAYER_DIR = ".local/share/vulkan/implicit_layer.d"
-CONFIG_DIR = ".config/lsfg-vk"
+CONFIG_DIR = ".config/lsfg-vk-arm64"
 
-SCRIPT_NAME = "lsfg"
+SCRIPT_NAME = "lsfg-arm64"
 CONFIG_FILENAME = "conf.toml"
-LIB_FILENAME = "liblsfg-vk.so"
-JSON_FILENAME = "VkLayer_LS_frame_generation.json"
+LIB_FILENAME = "liblsfg-vk-arm64.so"
+JSON_FILENAME = "VkLayer_LSFGVK_ARM64_frame_generation.json"
 ZIP_FILENAME = "lsfg-vk_noui.zip"
 ARM_LIB_FILENAME = "liblsfg-vk-arm64.so"
 
@@ -30,9 +30,8 @@ ARMADA_GAME_LAUNCH = Path("/usr/libexec/armada/armada-game-launch")
 
 STEAM_COMMON_PATH = Path("steamapps/common/Lossless Scaling")
 LOSSLESS_DLL_NAME = "Lossless.dll"
-# lsfg-vk 1.x loads Lossless.dll, while lsfg-vk 2.0 loads lsfg-vk.dll. The two
-# files are not interchangeable, so detection picks the name from the engine
-# declared by the installed layer manifest (see dll_detection.py).
+# This fork runs the lsfg-vk 2.0 engine only, which loads lsfg-vk.dll. The
+# original engine's Lossless.dll is not interchangeable and is never accepted.
 LSFG_VK_DLL_NAME = "lsfg-vk.dll"
 
 ENV_LSFG_DLL_PATH = "LSFG_DLL_PATH"

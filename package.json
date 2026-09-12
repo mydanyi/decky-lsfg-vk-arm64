@@ -1,7 +1,7 @@
 {
-  "name": "decky-lsfg-vk",
-  "version": "0.12.8-armada-lsfg2.20260911.5",
-  "description": "Decky LSFG-VK for ARM64: Armada integration, lsfg-vk 2.0 configuration and Chinese UI",
+  "name": "decky-lsfg-vk-arm64",
+  "version": "0.12.8-armada-lsfg2.20260912.6",
+  "description": "LSFG-VK ARM64: Armada integration, lsfg-vk 2.0 configuration and Chinese UI",
   "type": "module",
   "scripts": {
     "build": "rollup -c",

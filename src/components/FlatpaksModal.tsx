@@ -131,7 +131,7 @@ export const FlatpaksModal: FC<FlatpaksModalProps> = ({ closeModal }) => {
     {
       id: 'try-first',
       title: t('FLATPAK_STEP_TRY_FIRST', 'Try first:'),
-      command: '~/lsfg'
+      command: '~/lsfg-arm64'
     },
     {
       id: 'try-full-path',
@@ -141,7 +141,7 @@ export const FlatpaksModal: FC<FlatpaksModalProps> = ({ closeModal }) => {
     {
       id: 'final-result',
       title: t('FLATPAK_STEP_FINAL', 'Final result should look like:'),
-      command: '~/lsfg "usr/bin/flatpak"'
+      command: '~/lsfg-arm64 "usr/bin/flatpak"'
     }
   ];
 

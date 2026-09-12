@@ -85,7 +85,7 @@ class RuntimeTomlTests(unittest.TestCase):
         self.assertEqual(manifest['layer']['name'], runtime_v2.LAYER_NAME)
         self.assertEqual(manifest['layer']['type'], 'GLOBAL')
         self.assertEqual(manifest['layer']['library_path'], str(library))
-        self.assertEqual(manifest['layer']['enable_environment'], {'ENABLE_LSFGVK': '1'})
+        self.assertEqual(manifest['layer']['enable_environment'], {'ENABLE_LSFGVK_ARM64': '1'})
         self.assertEqual(manifest['layer']['disable_environment'], {'DISABLE_LSFGVK': '1'})
 
     def test_is_v2_manifest_only_matches_the_v2_layer_name(self):
@@ -103,8 +103,8 @@ class RuntimeTomlTests(unittest.TestCase):
             self.assertFalse(runtime_v2.is_v2_manifest(Path(temp) / 'missing.json'))
 
 
-class EngineAwareDllDetectionTests(unittest.TestCase):
-    """The DLL name follows the installed engine, they are not interchangeable."""
+class V2OnlyDllDetectionTests(unittest.TestCase):
+    """v2-only fork: always lsfg-vk.dll, even pre-install; original manifest ignored."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -116,99 +116,93 @@ class EngineAwareDllDetectionTests(unittest.TestCase):
         self.service.local_share_dir = self.home / 'layers'
         self.service.local_share_dir.mkdir(parents=True)
 
-    def install_engine(self, layer_name):
-        (self.service.local_share_dir / JSON_FILENAME).write_text(
-            json.dumps({'layer': {'name': layer_name}})
-        )
-
     def detect(self, **env):
         environment = {'HOME': str(self.home)}
         environment.update(env)
         with mock.patch.dict(os.environ, environment, clear=True):
             return self.service.check_lossless_scaling_dll()
 
-    def test_v1_install_detects_lossless_dll(self):
-        (self.common / 'Lossless.dll').write_bytes(b'MZ')
-        result = self.detect()
-        self.assertTrue(result['detected'], result)
-        self.assertEqual(Path(result['path']).name, 'Lossless.dll')
-
-    def test_v1_install_ignores_lsfg_vk_dll(self):
-        (self.common / 'lsfg-vk.dll').write_bytes(b'MZ')
-        result = self.detect()
-        self.assertFalse(result['detected'], result)
-
-    def test_v2_install_detects_lsfg_vk_dll(self):
-        self.install_engine(runtime_v2.LAYER_NAME)
+    def test_detects_lsfg_vk_dll_before_install(self):
         (self.common / 'lsfg-vk.dll').write_bytes(b'MZ')
         result = self.detect()
         self.assertTrue(result['detected'], result)
         self.assertEqual(Path(result['path']).name, 'lsfg-vk.dll')
 
-    def test_v2_install_ignores_only_lossless_dll(self):
-        self.install_engine(runtime_v2.LAYER_NAME)
+    def test_ignores_lossless_dll_even_with_original_manifest(self):
         (self.common / 'Lossless.dll').write_bytes(b'MZ')
+        (self.service.local_share_dir / JSON_FILENAME).write_text(
+            json.dumps({'layer': {'name': 'VK_LAYER_LS_frame_generation'}}))
         result = self.detect()
         self.assertFalse(result['detected'], result)
 
-    def test_v2_install_prefers_lsfg_vk_dll_when_both_exist(self):
-        self.install_engine(runtime_v2.LAYER_NAME)
+    def test_prefers_lsfg_vk_dll_when_both_exist(self):
         (self.common / 'Lossless.dll').write_bytes(b'MZ')
         (self.common / 'lsfg-vk.dll').write_bytes(b'MZ')
         result = self.detect()
         self.assertTrue(result['detected'], result)
         self.assertEqual(Path(result['path']).name, 'lsfg-vk.dll')
+
+    def test_env_override_must_be_lsfg_vk_dll(self):
+        override = self.home / 'custom' / 'lsfg-vk.dll'
+        override.parent.mkdir()
+        override.write_bytes(b'MZ')
+        result = self.detect(LSFG_DLL_PATH=str(override))
+        self.assertTrue(result['detected'], result)
+        self.assertEqual(result['path'], str(override))
+        wrong = self.home / 'custom' / 'Lossless.dll'
+        wrong.write_bytes(b'MZ')
+        result = self.detect(LSFG_DLL_PATH=str(wrong))
+        self.assertFalse(result['detected'], result)
 
     def test_missing_dll_reports_not_detected(self):
         result = self.detect()
         self.assertFalse(result['detected'], result)
         self.assertIsNone(result['path'])
 
-    def test_env_override_must_match_the_engine(self):
-        override = self.home / 'custom' / 'lsfg-vk.dll'
-        override.parent.mkdir()
-        override.write_bytes(b'MZ')
-
-        # 1.x engine must not accept a v2-named override.
-        result = self.detect(LSFG_DLL_PATH=str(override))
-        self.assertFalse(result['detected'], result)
-
-        # 2.0 engine accepts it.
-        self.install_engine(runtime_v2.LAYER_NAME)
-        result = self.detect(LSFG_DLL_PATH=str(override))
-        self.assertTrue(result['detected'], result)
-        self.assertEqual(result['path'], str(override))
-
     def test_detects_dll_in_an_extra_steam_library(self):
         extra = self.home / 'extra-library'
         extra_common = extra / 'steamapps/common/Lossless Scaling'
         extra_common.mkdir(parents=True)
-        (extra_common / 'Lossless.dll').write_bytes(b'MZ')
-
+        (extra_common / 'lsfg-vk.dll').write_bytes(b'MZ')
         steam_root = self.home / '.local/share/Steam'
         (steam_root / 'steamapps').mkdir(parents=True, exist_ok=True)
         (steam_root / 'steamapps/libraryfolders.vdf').write_text(
             '"libraryfolders"\n{\n    "1"\n    {\n        "path"        "'
-            + str(extra).replace('\\', '/') + '"\n    }\n}\n'
-        )
-
+            + str(extra).replace('\\', '/') + '"\n    }\n}\n')
         result = self.detect()
         self.assertTrue(result['detected'], result)
         self.assertEqual(Path(result['path']).parent, extra_common)
 
 
 class LaunchLineInjectionTests(unittest.TestCase):
-    def test_enabled_config_enables_layer_without_disable_flag(self):
+    def test_enabled_config_enables_owned_layer_without_disable_flag(self):
         lines = runtime_v2.launch_lines(make_config(multiplier=2), Path('/tmp/decky-v2.toml'))
-        self.assertIn('export ENABLE_LSFGVK=1', lines)
+        self.assertIn('export ENABLE_LSFGVK_ARM64=1', lines)
         self.assertIn('unset DISABLE_LSFGVK', lines)
         self.assertNotIn('export DISABLE_LSFGVK=1', lines)
+        self.assertIn('unset ENABLE_LSFGVK LSFG_PROCESS', lines)
+
+    def test_upstream_layers_disabled_preserving_other_entries(self):
+        import os
+        import subprocess
+
+        lines = runtime_v2.launch_lines(make_config(multiplier=2), Path('/tmp/decky-v2.toml'))
+        env = os.environ.copy()
+        env['VK_LOADER_LAYERS_DISABLE'] = 'VK_LAYER_something_else'
+        result = subprocess.run(
+            ['/bin/sh', '-c', '\n'.join(lines) + '\nprintf "%s" "$VK_LOADER_LAYERS_DISABLE"'],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        self.assertTrue(result.stdout.startswith('VK_LAYER_something_else,'))
+        self.assertIn('VK_LAYER_LS_frame_generation', result.stdout)
+        self.assertIn('VK_LAYER_LSFGVK_frame_generation', result.stdout)
 
     def test_off_config_injects_nothing(self):
         lines = runtime_v2.launch_lines(make_config(multiplier=1), Path('/tmp/decky-v2.toml'))
         self.assertIn('export DISABLE_LSFGVK=1', lines)
-        self.assertIn('unset ENABLE_LSFGVK', lines)
-        self.assertNotIn('export ENABLE_LSFGVK=1', lines)
+        self.assertIn('unset ENABLE_LSFGVK_ARM64', lines)
+        self.assertNotIn('export ENABLE_LSFGVK_ARM64=1', lines)
+        self.assertNotIn('export LSFG_PROCESS=', '\n'.join(lines))
 
     def test_is_enabled_only_above_1x(self):
         self.assertFalse(runtime_v2.is_enabled(make_config(multiplier=1)))

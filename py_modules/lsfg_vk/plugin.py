@@ -6,6 +6,7 @@ Vulkan layer for frame generation on Steam Deck.
 """
 
 import os
+import shlex
 import subprocess
 import hashlib
 from typing import Dict, Any
@@ -153,8 +154,8 @@ class Plugin:
                 schema_data["profiles"] = profiles_response.get("profiles", [])
                 schema_data["current_profile"] = profiles_response.get("current_profile")
             else:
-                schema_data["profiles"] = ["decky-lsfg-vk"]
-                schema_data["current_profile"] = "decky-lsfg-vk"
+                schema_data["profiles"] = ["decky-lsfg-vk-arm64"]
+                schema_data["current_profile"] = "decky-lsfg-vk-arm64"
             
             return schema_data
             
@@ -164,8 +165,8 @@ class Plugin:
                 "field_names": ConfigurationManager.get_field_names(),
                 "field_types": {name: field_type.value for name, field_type in ConfigurationManager.get_field_types().items()},
                 "defaults": ConfigurationManager.get_defaults(),
-                "profiles": ["decky-lsfg-vk"],
-                "current_profile": "decky-lsfg-vk"
+                "profiles": ["decky-lsfg-vk-arm64"],
+                "current_profile": "decky-lsfg-vk-arm64"
             }
 
     async def update_lsfg_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -255,10 +256,13 @@ class Plugin:
         Returns:
             Dict containing the launch option string and instructions
         """
+        entry = shlex.quote(str(self.installation_service.lsfg_launch_script_path))
         return {
-            "launch_option": "~/lsfg %command%",
+            "launch_option": f"{entry} %command%",
             "instructions": "Add this to your game's launch options in Steam Properties",
-            "explanation": "The lsfg script is created during installation and sets up the environment for the plugin"
+            "explanation": ("The lsfg-arm64 script is created during installation and sets up "
+                            "the environment for the plugin. It can coexist with the original "
+                            "LSFG plugin; choose one launcher per game.")
         }
 
     async def get_config_file_content(self) -> Dict[str, Any]:
@@ -367,7 +371,11 @@ class Plugin:
         Returns:
             BaseResponse dict with success status and message/error
         """
-        return self.flatpak_service.install_extension(version)
+        return {
+            "success": False,
+            "error": ("Legacy Flatpak extension management is not supported by "
+                      "this ARM64 v2 plugin"),
+        }
 
     async def uninstall_flatpak_extension(self, version: str) -> Dict[str, Any]:
         """Uninstall lsfg-vk Flatpak runtime extension
@@ -378,7 +386,11 @@ class Plugin:
         Returns:
             BaseResponse dict with success status and message/error
         """
-        return self.flatpak_service.uninstall_extension(version)
+        return {
+            "success": False,
+            "error": ("Legacy Flatpak extension management is not supported by "
+                      "this ARM64 v2 plugin"),
+        }
 
     async def get_flatpak_apps(self) -> Dict[str, Any]:
         """Get list of installed Flatpak apps and their lsfg-vk override status
@@ -397,7 +409,11 @@ class Plugin:
         Returns:
             FlatpakOverrideResponse dict with operation result
         """
-        return self.flatpak_service.set_app_override(app_id)
+        return {
+            "success": False,
+            "error": ("Legacy Flatpak extension management is not supported by "
+                      "this ARM64 v2 plugin"),
+        }
 
     async def remove_flatpak_app_override(self, app_id: str) -> Dict[str, Any]:
         """Remove lsfg-vk overrides for a Flatpak app
@@ -408,7 +424,11 @@ class Plugin:
         Returns:
             FlatpakOverrideResponse dict with operation result
         """
-        return self.flatpak_service.remove_app_override(app_id)
+        return {
+            "success": False,
+            "error": ("Legacy Flatpak extension management is not supported by "
+                      "this ARM64 v2 plugin"),
+        }
     
     async def _main(self):
         """
@@ -420,7 +440,7 @@ class Plugin:
         payload. An explicit uninstall is never followed by an automatic
         reinstall because _main only runs on plugin load.
         """
-        decky.logger.info("decky-lsfg-vk plugin loaded")
+        decky.logger.info("decky-lsfg-vk-arm64 plugin loaded")
 
         try:
             check = self.installation_service.check_installation()
@@ -444,70 +464,32 @@ class Plugin:
         This method is called by Decky Loader when the plugin is being unloaded.
         Any cleanup code should go here.
         """
-        decky.logger.info("decky-lsfg-vk plugin unloaded")
+        decky.logger.info("decky-lsfg-vk-arm64 plugin unloaded")
 
     async def _uninstall(self):
         """
         Called when the plugin is uninstalled.
         
         This method is called by Decky Loader when the plugin is being uninstalled.
-        Performs cleanup of plugin files and flatpak extensions.
+        Performs cleanup of this fork's own plugin files only.
         """
-        decky.logger.info("decky-lsfg-vk plugin being uninstalled")
+        decky.logger.info("decky-lsfg-vk-arm64 plugin being uninstalled")
         
-        # Clean up lsfg-vk files when the plugin is uninstalled
+        # Clean up this fork's own files only; the original plugin, Flatpak
+        # runtimes and overrides are never touched (coexistence).
         self.installation_service.cleanup_on_uninstall()
-        
-        # Also clean up flatpak extensions if they are installed
-        try:
-            decky.logger.info("Checking for flatpak extensions to uninstall")
-            
-            extension_status = self.flatpak_service.get_extension_status()
-            
-            if extension_status.get("success"):
-                if extension_status.get("installed_23_08"):
-                    decky.logger.info("Uninstalling lsfg-vk flatpak runtime 23.08")
-                    result = self.flatpak_service.uninstall_extension("23.08")
-                    if result.get("success"):
-                        decky.logger.info("Successfully uninstalled flatpak runtime 23.08")
-                    else:
-                        decky.logger.warning(f"Failed to uninstall flatpak runtime 23.08: {result.get('error')}")
-                
-                if extension_status.get("installed_24_08"):
-                    decky.logger.info("Uninstalling lsfg-vk flatpak runtime 24.08")
-                    result = self.flatpak_service.uninstall_extension("24.08")
-                    if result.get("success"):
-                        decky.logger.info("Successfully uninstalled flatpak runtime 24.08")
-                    else:
-                        decky.logger.warning(f"Failed to uninstall flatpak runtime 24.08: {result.get('error')}")
-                        
-                decky.logger.info("Flatpak extension cleanup completed")
-            else:
-                decky.logger.info(f"Could not check flatpak status for cleanup: {extension_status.get('error')}")
-                
-        except Exception as e:
-            decky.logger.error(f"Error during flatpak cleanup: {e}")
-        
-        decky.logger.info("decky-lsfg-vk plugin uninstall cleanup completed")
+
+        decky.logger.info("decky-lsfg-vk-arm64 plugin uninstall cleanup completed")
 
     async def _migration(self):
         """
         Migrations that should be performed before entering `_main()`.
         
         This method is called by Decky Loader for plugin migrations.
-        Currently migrates logs, settings, and runtime data from old locations.
+        The original plugin owns the old shared locations; leave them intact.
         """
-        decky.logger.info("Running decky-lsfg-vk plugin migrations")
-        
-        decky.migrate_logs(os.path.join(decky.DECKY_USER_HOME,
-                                       ".config", "decky-lossless-scaling-vk", "lossless-scaling-vk.log"))
-        
-        decky.migrate_settings(
-            os.path.join(decky.DECKY_HOME, "settings", "lossless-scaling-vk.json"),
-            os.path.join(decky.DECKY_USER_HOME, ".config", "decky-lossless-scaling-vk"))
-        
-        decky.migrate_runtime(
-            os.path.join(decky.DECKY_HOME, "lossless-scaling-vk"),
-            os.path.join(decky.DECKY_USER_HOME, ".local", "share", "decky-lossless-scaling-vk"))
-        
-        decky.logger.info("decky-lsfg-vk plugin migrations completed")
+        # Coexistence: never move the original plugin's logs, settings or
+        # runtime data. This fork's migration is intentionally a no-op.
+        decky.logger.info("decky-lsfg-vk-arm64 plugin migrations: nothing to migrate")
+
+        decky.logger.info("decky-lsfg-vk-arm64 plugin migrations completed")

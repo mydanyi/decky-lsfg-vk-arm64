@@ -28,10 +28,10 @@ class InstallationV2Tests(unittest.TestCase):
         self.service.user_home = self.home
         self.service.local_lib_dir = self.home / '.local/lib'
         self.service.local_share_dir = self.home / VULKAN_LAYER_DIR
-        self.service.config_dir = self.home / '.config/lsfg-vk'
+        self.service.config_dir = self.home / '.config/lsfg-vk-arm64'
         self.service.config_file_path = self.service.config_dir / CONFIG_FILENAME
-        self.service.lsfg_launch_script_path = self.home / 'lsfg'
-        self.service.lsfg_script_path = self.home / 'lsfg'
+        self.service.lsfg_launch_script_path = self.home / 'lsfg-arm64'
+        self.service.lsfg_script_path = self.home / 'lsfg-arm64'
         self.service.lib_file = self.service.local_lib_dir / LIB_FILENAME
         self.service.json_file = self.service.local_share_dir / JSON_FILENAME
 
@@ -44,7 +44,7 @@ class InstallationV2Tests(unittest.TestCase):
             'current_profile': 'my-game',
             'profiles': {
                 'my-game': dict(ConfigurationManager.get_defaults(), multiplier=3, flow_scale=0.6),
-                'decky-lsfg-vk': ConfigurationManager.get_defaults(),
+                'decky-lsfg-vk-arm64': ConfigurationManager.get_defaults(),
             },
             'global_config': {'dll': '/custom/Lossless.dll', 'no_fp16': True},
         }

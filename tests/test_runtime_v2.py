@@ -30,13 +30,13 @@ class RuntimeV2Tests(unittest.TestCase):
             'local_share_dir': self.root / 'layers',
             'config_dir': self.root / 'config',
             'config_file_path': self.root / 'config/conf.toml',
-            'lsfg_script_path': self.root / 'lsfg',
+            'lsfg_script_path': self.root / 'lsfg-arm64',
         }.items():
             setattr(self.service, attr, value)
         self.service.config_dir.mkdir()
         self.service.local_share_dir.mkdir()
         self.manifest = self.service.local_share_dir / JSON_FILENAME
-        self.manifest.write_text(json.dumps({'layer': {'name': 'VK_LAYER_LSFGVK_frame_generation'}}))
+        self.manifest.write_text(json.dumps({'layer': {'name': runtime_v2.LAYER_NAME}}))
         config = ConfigurationManager.get_defaults()
         config.update(multiplier=2, flow_scale=0.7, performance_mode=True, enable_wsi=False)
         self.data = {'current_profile': 'decky-lsfg-vk', 'profiles': {'decky-lsfg-vk': config},
@@ -60,7 +60,11 @@ class RuntimeV2Tests(unittest.TestCase):
         self.assertEqual((p['multiplier'], p['flow_scale'], p['performance_mode']), (2, 0.7, True))
         self.assertEqual(p['pacing_mode'], 'vsync')
         self.assertTrue(p['override_present_mode'])
-        self.assertEqual(env['ENABLE_LSFGVK'], '1')
+        self.assertEqual(env['ENABLE_LSFGVK_ARM64'], '1')
+        self.assertNotIn('ENABLE_LSFGVK', env)
+        self.assertNotIn('LSFG_PROCESS', env)
+        self.assertIn('VK_LAYER_LS_frame_generation', env['VK_LOADER_LAYERS_DISABLE'])
+        self.assertIn('VK_LAYER_LSFGVK_frame_generation', env['VK_LOADER_LAYERS_DISABLE'])
         self.assertEqual(env['DISABLE_LSFG'], '1')
         self.assertNotIn('DISABLE_LSFGVK', env)
         self.assertNotIn('LSFGVK_ENV', env)
@@ -70,7 +74,8 @@ class RuntimeV2Tests(unittest.TestCase):
         self.data['profiles']['decky-lsfg-vk']['multiplier'] = 1
         env = self.generate()
         self.assertEqual(env.get('DISABLE_LSFGVK'), '1')
-        self.assertNotIn('ENABLE_LSFGVK', env)
+        self.assertNotIn('ENABLE_LSFGVK_ARM64', env)
+        self.assertNotIn('LSFG_PROCESS', env)
         self.assertEqual(tomllib.loads(Path(env['LSFGVK_CONFIG']).read_text())['profile'][0]['multiplier'], 1)
 
     def test_profile_change_uses_stable_runtime_name(self):
@@ -115,15 +120,15 @@ class RuntimeV2Tests(unittest.TestCase):
         self.assertFalse(result['success'])
         self.assertIn('runtime file is not writable', result['error'])
 
-    def test_legacy_manifest_keeps_legacy_launch(self):
+    def test_legacy_manifest_never_enables_original_engine(self):
+        """A legacy owned manifest must fail, never launch the original engine."""
         self.manifest.write_text(json.dumps({'layer': {'name': 'VK_LAYER_LS_frame_generation'}}))
         self.service._save_profile_data(self.data)
         result = self.service.update_lsfg_script_from_profile_data(self.data)
-        self.assertTrue(result['success'])
-        env = json.loads(subprocess.check_output(['bash', str(self.service.lsfg_script_path), sys.executable,
-            '-c', 'import os,json;print(json.dumps(dict(os.environ)))']))
-        self.assertEqual(env['LSFG_PROCESS'], 'decky-lsfg-vk')
-        self.assertNotIn('LSFGVK_CONFIG', env)
+        self.assertFalse(result['success'])
+        self.assertIn('ARM64 v2 layer manifest', result.get('error', ''))
+        self.assertFalse(self.service.lsfg_script_path.exists())
+
 
 
 if __name__ == '__main__':

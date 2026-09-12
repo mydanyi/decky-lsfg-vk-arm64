@@ -4,16 +4,16 @@ import { GiPlasticDuck } from "react-icons/gi";
 import { Content } from "./components/Content";
 
 export default definePlugin(() => {
-  console.log("decky-lsfg-vk plugin initializing");
+  console.log("decky-lsfg-vk-arm64 plugin initializing");
 
   return {
-    name: "Decky LSFG-VK",
-    titleView: <div className={staticClasses.Title}>Decky LSFG-VK</div>,
+    name: "LSFG-VK ARM64",
+    titleView: <div className={staticClasses.Title}>LSFG-VK ARM64</div>,
     alwaysRender: true,
     content: <Content />,
     icon: <GiPlasticDuck />,
     onDismount() {
-      console.log("decky-lsfg-vk unloading");
+      console.log("decky-lsfg-vk-arm64 unloading");
     }
   };
 });

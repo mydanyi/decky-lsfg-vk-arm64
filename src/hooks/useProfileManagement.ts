@@ -16,7 +16,7 @@ import t from "../i18n/i18n";
 
 export function useProfileManagement() {
   const [profiles, setProfiles] = useState<string[]>([]);
-  const [currentProfile, setCurrentProfileState] = useState<string>("decky-lsfg-vk");
+  const [currentProfile, setCurrentProfileState] = useState<string>("decky-lsfg-vk-arm64");
   const [isLoading, setIsLoading] = useState(false);
 
   // Load profiles on hook initialization
@@ -68,7 +68,7 @@ export function useProfileManagement() {
 
   // Delete a profile
   const handleDeleteProfile = useCallback(async (profileName: string) => {
-    if (profileName === "decky-lsfg-vk") {
+    if (profileName === "decky-lsfg-vk-arm64") {
       showErrorToast(t('PROFILE_CANNOT_DELETE_TITLE', 'Cannot delete default profile'), t('PROFILE_CANNOT_DELETE_MSG', 'The default profile cannot be deleted'));
       return { success: false, error: "Cannot delete default profile" };
     }
@@ -81,7 +81,7 @@ export function useProfileManagement() {
         await loadProfiles();
         // If we deleted the current profile, it should have switched to default
         if (currentProfile === profileName) {
-          setCurrentProfileState("decky-lsfg-vk");
+          setCurrentProfileState("decky-lsfg-vk-arm64");
         }
         return result;
       } else {
@@ -100,7 +100,7 @@ export function useProfileManagement() {
 
   // Rename a profile
   const handleRenameProfile = useCallback(async (oldName: string, newName: string) => {
-    if (oldName === "decky-lsfg-vk") {
+    if (oldName === "decky-lsfg-vk-arm64") {
       showErrorToast(t('PROFILE_CANNOT_RENAME_TITLE', 'Cannot rename default profile'), t('PROFILE_CANNOT_RENAME_MSG', 'The default profile cannot be renamed'));
       return { success: false, error: "Cannot rename default profile" };
     }

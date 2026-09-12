@@ -45,7 +45,7 @@ export function FgmodClipboardButton() {
     
     setIsLoading(true);
     try {
-      const text = "~/fgmod/fgmod ~/lsfg %command%";
+      const text = "~/fgmod/fgmod ~/lsfg-arm64 %command%";
       const { success, verified } = await copyWithVerification(text);
       
       if (success) {
@@ -84,7 +84,7 @@ export function FgmodClipboardButton() {
             }} />
           ) : isLoading ? (
             <FaClipboard style={{ 
-              animation: "pulse 1s ease-in-out infinite",
+              animation: "lsfg-arm64-pulse 1s ease-in-out infinite",
               opacity: 0.7 
             }} />
           ) : (
@@ -99,7 +99,7 @@ export function FgmodClipboardButton() {
         </div>
       </ButtonItem>
       <style>{`
-        @keyframes pulse {
+        @keyframes lsfg-arm64-pulse {
           0% { opacity: 0.7; }
           50% { opacity: 1; }
           100% { opacity: 0.7; }
