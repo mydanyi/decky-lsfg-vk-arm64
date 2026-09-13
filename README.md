@@ -4,12 +4,6 @@
 
 [下载发布版](https://github.com/mydanyi/decky-lsfg-vk-arm64/releases/latest)
 
-## 赞助与交流
-
-- 爱发电赞助：[https://afdian.com/a/meetmiku](https://afdian.com/a/meetmiku)
-- QQ 粉丝群：**487945399**
-- QQ 养老群：**477426414**
-
 ## 功能
 
 - 简体中文界面，支持补帧倍率、光流比例、性能模式和配置档案。
@@ -55,3 +49,9 @@ This community fork is based on [xXJSONDeruloXx/decky-lsfg-vk](https://github.co
 The [lsfg-vk](https://lsfg-vk.dev/) native component has its own CC BY-NC-ND 4.0 license, included in the release archive. The plugin license does not replace the native component's license. Lossless Scaling and its DLL remain subject to their own terms.
 
 Thanks to the original plugin authors, lsfg-vk contributors, Lossless Scaling developers, Decky Loader team and Armada contributors. Report issues specific to this fork in [this repository](https://github.com/mydanyi/decky-lsfg-vk-arm64/issues).
+
+## 赞助与交流
+
+- 爱发电赞助：[https://afdian.com/a/meetmiku](https://afdian.com/a/meetmiku)
+- QQ 粉丝群：**487945399**
+- QQ 养老群：**477426414**
