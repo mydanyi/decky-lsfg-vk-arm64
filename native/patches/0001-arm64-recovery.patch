@@ -719,7 +719,7 @@
 +}
 --- /dev/null
 +++ b/lsfg-vk-layer/src/modes/recovery_controller.hpp
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,136 @@
 +#pragma once
 +#include <algorithm>
 +#include <cmath>
@@ -767,6 +767,9 @@
 +                outputCadenceImproves(m_beforeMs, m_committed, mean, m_current, outputRatio)) {
 +                m_committed = m_current;
 +                m_latestMs = mean;
++                m_failedDownMs = 0.0;
++                m_worseWindows = 0;
++                m_nextDownTry = 0.0;
 +                if (!m_cap) m_referenceMs = mean;
 +                m_retryMs = 4000.0;
 +                m_nextTry = m_clock + m_retryMs;
@@ -885,7 +888,7 @@
 +}
 --- a/lsfg-vk-layer/src/modes/vsync.cpp
 +++ b/lsfg-vk-layer/src/modes/vsync.cpp
-@@ -2,18 +2,137 @@
+@@ -2,18 +2,125 @@
  
  #include "vsync.hpp"
  #include "../hooks.hpp"
@@ -948,7 +951,7 @@
 +        unsigned outputs;
 +        bool log;
 +
-+        int presentImage(uint32_t index, VkSemaphore semaphore, VkFence readyFence,
++        VkResult presentImage(uint32_t index, VkSemaphore semaphore, VkFence readyFence,
 +                         unsigned ordinal) {
 +            VkResult ready = VK_SUCCESS;
 +            if (readyFence != VK_NULL_HANDLE) {
@@ -958,11 +961,12 @@
 +                else if (ready != VK_SUCCESS) return ready;
 +            }
 +            pacingSleepUntil(schedule.deadline(pacingNowNs()));
++            VkResult perSwapchain = VK_SUCCESS;
 +            const VkPresentInfoKHR info{
 +                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 +                .waitSemaphoreCount = 1, .pWaitSemaphores = &semaphore,
 +                .swapchainCount = 1, .pSwapchains = &swapchain,
-+                .pImageIndices = &index
++                .pImageIndices = &index, .pResults = &perSwapchain
 +            };
 +            const auto previous = schedule.lastNs();
 +            int64_t actual = 0;
@@ -972,22 +976,9 @@
 +                "[lsfgvk-smooth-frame] outputs=%u ordinal=%u submit_ns=%" PRId64
 +                " gap_ms=%.3f ready=%d result=%d\n", outputs, ordinal, actual,
 +                (actual - previous) / 1e6, static_cast<int>(ready), static_cast<int>(result));
-+            return result == VK_SUBOPTIMAL_KHR ? VK_SUCCESS : result;
++            return result == VK_SUCCESS ? perSwapchain : result;
 +        }
 +    };
-+
-+    VkResult enqueueSmoothed(DeferredPresent& worker, const std::shared_ptr<SmoothBatch>& batch,
-+                            uint32_t index, VkSemaphore semaphore, VkFence readyFence,
-+                            unsigned ordinal) {
-+        const auto job = [batch, index, semaphore, readyFence, ordinal]() {
-+            return batch->presentImage(index, semaphore, readyFence, ordinal);
-+        };
-+        if (worker.append(job)) return VK_SUCCESS;
-+        // Allocation/thread failure must preserve order and not lose a present.
-+        const auto drained = worker.drain();
-+        if (drained != VK_SUCCESS) return static_cast<VkResult>(drained);
-+        return static_cast<VkResult>(job());
-+    }
 +
 +    std::optional<PairPacer> pacingFromEnvironment() {
 +        const char* value{std::getenv("LSFGVK_PACE_FPS")};
@@ -1023,7 +1014,7 @@
      /// Modify swapchain create info
      VkSwapchainCreateInfoKHR modifySwapchainCreateInfo(
          VkSwapchainCreateInfoKHR info,
-@@ -68,7 +187,24 @@
+@@ -68,7 +175,24 @@
          ),
          alloc,
          swapchain
@@ -1049,23 +1040,25 @@
      this->m_syncPasses.resize(this->m_swapchainImages.size());
      for (auto& syncPass : this->m_syncPasses) {
          syncPass.copyCmdbuf = vkhelper::createCommandBuffer(
-@@ -133,20 +269,88 @@
-     }
- }
- 
-+VsyncSwapchain::~VsyncSwapchain() {
-+    this->drainPending(); // Before sync passes and the context are destroyed.
-+}
-+
-+VkResult VsyncSwapchain::drainPending() {
-+    return static_cast<VkResult>(this->m_deferredOriginal.drain());
-+}
-+
- VkResult VsyncSwapchain::QueuePresentKHR(
-     PFN_vkQueuePresentKHR fetchFunc,
+@@ -138,15 +262,85 @@
      VkQueue queue,
      const VkPresentInfoKHR* presentInfo
  ) {
++    const auto finishPresent = [this, presentInfo](VkResult result) {
++        if (presentInfo->pResults) presentInfo->pResults[0] = result;
++        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++            // A failed intermediate present may leave the batch incomplete.
++            // Retain its actual error until this swapchain is recreated;
++            // retrying could wait on a fence whose final copy was never queued.
++            this->m_pacingFailure = result;
++            this->m_recovery.reset();
++            this->m_outputSmoother.reset();
++            this->m_previousEntryNs = 0;
++            if (this->m_lsfgvkContext) this->m_lsfgvkContext->invalidateHistory();
++            if (this->m_pairPacer) this->m_pairPacer->reset();
++        }
++        return result;
++    };
 +    if (this->m_pacingFailure != VK_SUCCESS) {
 +        if (presentInfo->pResults) {
 +            presentInfo->pResults[0] = this->m_pacingFailure;
@@ -1075,11 +1068,6 @@
 +
 +    try {
 +    const int64_t entryNs{pacingNowNs()};
-+    const auto deferredResult = this->drainPending();
-+    if (deferredResult != VK_SUCCESS) {
-+        if (presentInfo->pResults) presentInfo->pResults[0] = deferredResult;
-+        return deferredResult;
-+    }
      const auto status{Swapchain::QueuePresentKHR(fetchFunc, queue, presentInfo)};
 +    if (status == VK_ERROR_OUT_OF_DATE_KHR && this->m_pairPacer) {
 +        this->m_pairPacer->reset();
@@ -1139,7 +1127,7 @@
  
      if (status == VK_ERROR_OUT_OF_DATE_KHR) {
          this->resizeInnerSyncPasses(profile.multiplier - 1);
-@@ -172,8 +376,53 @@
+@@ -172,8 +366,54 @@
          }
      }
  
@@ -1178,7 +1166,8 @@
 +    this->m_lastSmoothGap = smoothGapMs;
 +    this->m_lastSmoothPhase = this->m_outputSmoother.phase();
 +    bool smoothThisFrame{false};
-+    std::shared_ptr<SmoothBatch> smoothBatch;
++    std::optional<SmoothBatch> smoothBatch;
++    VkResult generatedResult{VK_SUCCESS};
 +    const auto smoothBudgetNs = static_cast<uint64_t>(
 +        std::clamp(this->m_outputSmoother.sourcePeriodMs(), 8.0, 50.0) * 1e6);
 +    if (imagesToInsert == 0) {
@@ -1195,7 +1184,7 @@
  
      this->m_lsfgvkContext->dispatch(
          *syncPass.copyCmdbuf,
-@@ -188,13 +437,31 @@
+@@ -188,13 +428,31 @@
          const auto& innerSyncPass{syncPass.innerSyncPasses.at(i)};
  
          // Acquire swapchain image
@@ -1234,7 +1223,7 @@
  
          // Copy generated frame into swapchain image
          const auto& swapchainImage{this->m_swapchainImages.at(acquireResult.value)};
-@@ -211,6 +478,60 @@
+@@ -211,6 +469,59 @@
              { *innerSyncPass.acquireSemaphore },
              signalSemaphores
          );
@@ -1258,13 +1247,12 @@
 +        }
 +
 +        if (smoothBatch && i > 0) {
-+            const auto result = enqueueSmoothed(this->m_deferredOriginal, smoothBatch,
++            const auto result = smoothBatch->presentImage(
 +                acquireResult.value, static_cast<VkSemaphore>(*innerSyncPass.copySemaphore),
 +                this->m_lsfgvkContext->generatedReadyFence(), static_cast<unsigned>(i));
-+            if (result != VK_SUCCESS) {
-+                if (presentInfo->pResults) presentInfo->pResults[0] = result;
-+                return result;
-+            }
++            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
++                return finishPresent(result);
++            if (result == VK_SUBOPTIMAL_KHR) generatedResult = result;
 +            continue;
 +        }
 +
@@ -1295,7 +1283,7 @@
  
          // Present swapchain image
          VkSemaphore copySemaphore2{*innerSyncPass.copySemaphore}; // NOLINT (32-bit const)
-@@ -223,9 +544,29 @@
+@@ -223,9 +534,30 @@
              .pSwapchains = presentInfo->pSwapchains,
              .pImageIndices = &acquireResult.value
          };
@@ -1308,15 +1296,17 @@
 +                i, (int)result);
 +        }
          if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+-            throw vk::SystemError(result, vk::errorCategory());
 +            if (diagThis) {
 +                std::fprintf(stderr,
-+                    "[lsfgvk-diag]   generated present[%zu] throwing %d\n",
++                    "[lsfgvk-diag]   generated present[%zu] failed %d\n",
 +                    i, (int)result);
 +            }
-             throw vk::SystemError(result, vk::errorCategory());
++            return finishPresent(result);
 +        }
++        if (result == VK_SUBOPTIMAL_KHR) generatedResult = result;
 +        if (smoothThisFrame && i == 0) {
-+            smoothBatch = std::make_shared<SmoothBatch>(SmoothBatch{
++            smoothBatch.emplace(SmoothBatch{
 +                .context = this->m_lsfgvkContext.get(), .present = fetchFunc,
 +                .queue = queue, .swapchain = *presentInfo->pSwapchains,
 +                .schedule = PresentSchedule(actualGenStart, static_cast<int64_t>(smoothGapMs * 1e6)),
@@ -1326,7 +1316,7 @@
          }
      }
  
-@@ -237,12 +578,52 @@
+@@ -237,12 +569,54 @@
          .pWaitSemaphores = &presentSemaphore2,
          .swapchainCount = 1,
          .pSwapchains = presentInfo->pSwapchains,
@@ -1336,10 +1326,12 @@
      };
 -    const auto result{fetchFunc(queue, &presentInfo2)};
 +    if (smoothBatch) {
-+        const auto result = enqueueSmoothed(this->m_deferredOriginal, smoothBatch,
++        // Keep every queue operation inside the originating call. Returning
++        // early would break host synchronization and lose presentation results.
++        auto result = smoothBatch->presentImage(
 +            *presentInfo->pImageIndices, presentSemaphore2, VK_NULL_HANDLE, imagesToInsert);
-+        if (presentInfo->pResults) presentInfo->pResults[0] = result;
-+        return result;
++        if (result == VK_SUCCESS) result = generatedResult;
++        return finishPresent(result);
 +    }
 +    if (pacing) {
 +        pacingSleepUntil(this->m_pairPacer->originalDeadline(actualGenStart));
@@ -1362,15 +1354,19 @@
 +            "[lsfgvk-diag]   original present result=%d\n", (int)result);
 +    }
      if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+-        throw vk::SystemError(result, vk::errorCategory());
+-    }
+-
+-    return result;
 +        if (diagThis) {
 +            std::fprintf(stderr,
-+                "[lsfgvk-diag]   original present throwing %d\n",
++                "[lsfgvk-diag]   original present failed %d\n",
 +                (int)result);
 +        }
-         throw vk::SystemError(result, vk::errorCategory());
-     }
- 
-     return result;
++        return finishPresent(result);
++    }
++
++    return finishPresent(result == VK_SUCCESS ? generatedResult : result);
 +    } catch (...) {
 +        this->m_recovery.reset();
 +        this->m_previousEntryNs = 0;
@@ -1383,34 +1379,29 @@
  }
 --- a/lsfg-vk-layer/src/modes/vsync.hpp
 +++ b/lsfg-vk-layer/src/modes/vsync.hpp
-@@ -3,8 +3,13 @@
+@@ -3,8 +3,12 @@
  #pragma once
  
  #include "../hooks.hpp"
 +#include "pair_pacer.hpp"
 +#include "recovery_controller.hpp"
 +#include "output_smoother.hpp"
-+#include "deferred_present.hpp"
  
  #include <cstddef>
 +#include <optional>
  #include <vector>
  #include <vk>
  
-@@ -39,7 +44,12 @@
-             VkQueue queue,
+@@ -40,6 +44,8 @@
              const VkPresentInfoKHR* presentInfo
          ) override;
-+        ~VsyncSwapchain() override;
-+        VkResult drainPending() override;
      private:
-+        DeferredPresent m_deferredOriginal;
 +        unsigned m_smoothSamples{0};
 +        unsigned m_smoothReady{0};
          struct SyncPass {
              vk::UniqueCommandBuffer copyCmdbuf;
              vk::UniqueSemaphore presentSemaphore;
-@@ -51,6 +61,15 @@
+@@ -51,6 +57,15 @@
              std::vector<InnerSyncPass> innerSyncPasses;
          };
          std::vector<SyncPass> m_syncPasses;
@@ -2252,7 +2243,7 @@
 +}
 --- /dev/null
 +++ b/tests/multiplier_present_regression.py
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +from pathlib import Path
 +import subprocess
 +root=Path(__file__).resolve().parents[1]
@@ -2279,7 +2270,8 @@
 +VkResult nextPresent=VK_SUCCESS;
 +VkResult guardedPresent(PFN_vkQueuePresentKHR,VkQueue,const VkPresentInfoKHR* info,int64_t* start){
 + assert(info->waitSemaphoreCount==1 && info->swapchainCount==1);
-+ assert(info->pWaitSemaphores && info->pImageIndices && !info->pNext && !info->pResults);
++ assert(info->pWaitSemaphores && info->pImageIndices && !info->pNext && info->pResults);
++ *info->pResults=nextPresent;
 + indices.push_back(*info->pImageIndices);*start=now;return nextPresent;
 +}
 +''' + production + r'''
@@ -2307,7 +2299,7 @@
 + ctx.result=VK_ERROR_DEVICE_LOST;
 + assert(late.presentImage(5,VK_NULL_HANDLE,fence,5)==VK_ERROR_DEVICE_LOST && indices.size()==4);
 + nextPresent=VK_SUBOPTIMAL_KHR;
-+ assert(late.presentImage(6,VK_NULL_HANDLE,VK_NULL_HANDLE,6)==VK_SUCCESS);
++ assert(late.presentImage(6,VK_NULL_HANDLE,VK_NULL_HANDLE,6)==VK_SUBOPTIMAL_KHR);
 + nextPresent=VK_ERROR_OUT_OF_DATE_KHR;
 + assert(late.presentImage(7,VK_NULL_HANDLE,VK_NULL_HANDLE,7)==VK_ERROR_OUT_OF_DATE_KHR);
 + std::puts("PASS production 2x/3x/4x tail timing, individual readiness, late rebasing, timeout preserves output and error propagation");
@@ -2490,6 +2482,117 @@
 +    std::cout << "all passed\n";
 +    return 0;
 +}
+--- /dev/null
++++ b/tests/present_call_boundary_regression.py
+@@ -0,0 +1,108 @@
++from pathlib import Path
++import subprocess
++root=Path(__file__).resolve().parents[1]
++s=(root/'lsfg-vk-layer/src/modes/vsync.cpp').read_text()
++helpers=s[s.index('    struct SmoothBatch {'):s.index('    std::optional<PairPacer> pacingFromEnvironment()')]
++start=s.index('    if (smoothBatch) {',s.index('// Present the original image'))
++branch=s[start:s.index('    if (pacing) {',start)]
++start=s.index('        if (smoothBatch && i > 0) {')
++tail=s[start:s.index('        if (pacing) {',start)]
++start=s.index('    const auto finishPresent =')
++entry=s[start:s.index('    try {',start)]
++fixture=r'''
++#include <vulkan/vulkan.h>
++#include "present_schedule.hpp"
++#include "deferred_present.hpp"
++#include <memory>
++#include <optional>
++#include <cinttypes>
++#include <cstdio>
++#include <thread>
++#include <future>
++#include <vector>
++#include <cassert>
++using namespace lsfgvk::layer;
++int64_t pacingNowNs(){return 0;}
++void pacingSleepUntil(int64_t){}
++struct ContextWrapper {VkResult waitGeneratedReady(uint64_t,VkFence){return VK_SUCCESS;} VkFence generatedReadyFence(){return VK_NULL_HANDLE;} void invalidateHistory(){}};
++std::thread::id origin, actual;
++VkResult driverResult=VK_SUCCESS;
++uint32_t failIndex=42;
++std::vector<uint32_t> indices;
++std::promise<void>* entered=nullptr;
++std::shared_future<void> gate;
++VkResult guardedPresent(PFN_vkQueuePresentKHR,VkQueue,const VkPresentInfoKHR* info,int64_t* start){
++ actual=std::this_thread::get_id();*start=0;
++ indices.push_back(*info->pImageIndices);
++ if(entered){entered->set_value();gate.wait();}
++ auto result=*info->pImageIndices==failIndex?driverResult:VK_SUCCESS;
++ if(info->pResults)*info->pResults=result;
++ return result;
++}
++''' + helpers + r'''
++struct Harness {
++ DeferredPresent m_deferredOriginal;
++ ContextWrapper ctx;
++ ContextWrapper* m_lsfgvkContext=&ctx;
++ struct Reset {void reset(){}};
++ Reset m_recovery,m_outputSmoother;
++ std::optional<Reset> m_pairPacer;
++ int64_t m_previousEntryNs=100;
++ VkResult m_pacingFailure=VK_SUCCESS;
++ VkResult run(VkPresentInfoKHR* presentInfo, unsigned outputs, VkResult generatedResult=VK_SUCCESS){
++ auto smoothBatch=std::make_shared<SmoothBatch>(SmoothBatch{&ctx,nullptr,VK_NULL_HANDLE,VK_NULL_HANDLE,PresentSchedule(0,0),33333333,outputs,false});
++ VkSemaphore presentSemaphore2=VK_NULL_HANDLE;
++ unsigned imagesToInsert=outputs-1;
++''' + entry + r'''
++ for(size_t i=1;i<imagesToInsert;++i){
++  struct {uint32_t value;} acquireResult{static_cast<uint32_t>(i)};
++  struct {VkSemaphore* copySemaphore;} innerSyncPass{&presentSemaphore2};
++''' + tail + r'''
++ }
++''' + branch + r'''
++ return VK_ERROR_UNKNOWN;
++ }
++};
++int main(){
++ for(unsigned n:{2,3,4}){
++  for(auto code:{VK_SUCCESS,VK_SUBOPTIMAL_KHR,VK_ERROR_OUT_OF_DATE_KHR,VK_ERROR_DEVICE_LOST,VK_ERROR_SURFACE_LOST_KHR}){
++   Harness h;driverResult=code;failIndex=42;origin=std::this_thread::get_id();actual={};indices.clear();
++   uint32_t index=42;VkResult per=VK_NOT_READY;
++   VkPresentInfoKHR info{};info.pImageIndices=&index;info.pResults=&per;
++   auto rc=h.run(&info,n);h.m_deferredOriginal.drain();
++   if(rc!=code || per!=code || actual!=origin){std::puts("FAIL originating present must return actual status on caller thread");return 1;}
++   info.pResults=nullptr;
++   if(h.run(&info,n)!=code)return 2;
++  }
++  Harness h;driverResult=VK_SUCCESS;uint32_t index=42;VkResult per=VK_NOT_READY;
++  VkPresentInfoKHR info{};info.pImageIndices=&index;info.pResults=&per;
++  if(h.run(&info,n,VK_SUBOPTIMAL_KHR)!=VK_SUBOPTIMAL_KHR || per!=VK_SUBOPTIMAL_KHR)return 3;
++  if(n>2){
++   for(auto code:{VK_SUBOPTIMAL_KHR,VK_ERROR_OUT_OF_DATE_KHR,VK_ERROR_DEVICE_LOST,VK_ERROR_SURFACE_LOST_KHR,VK_ERROR_OUT_OF_HOST_MEMORY}){
++    Harness intermediate;
++    failIndex=1;driverResult=code;indices.clear();per=VK_NOT_READY;
++    if(intermediate.run(&info,n)!=code || per!=code)return 5;
++    if(code<0 && indices!=std::vector<uint32_t>{1})return 6;
++    if(code==VK_SUBOPTIMAL_KHR && indices.size()!=n-1)return 7;
++    if(code<0){
++     driverResult=VK_SUCCESS;per=VK_NOT_READY;
++     if(intermediate.run(&info,n)!=code || per!=code || indices!=std::vector<uint32_t>{1}){
++      std::puts("FAIL failed partial batch must not be reused on the next call");return 8;
++     }
++    }
++   }
++  }
++ }
++ // No return (and thus no subsequent application queue label) before driver submission.
++ Harness h;driverResult=VK_SUCCESS;failIndex=42;std::promise<void> started,release;entered=&started;gate=release.get_future().share();
++ uint32_t index=42;VkPresentInfoKHR info{};info.pImageIndices=&index;
++ auto call=std::async(std::launch::async,[&]{return h.run(&info,2);});
++ started.get_future().wait();bool early=call.wait_for(std::chrono::milliseconds(20))==std::future_status::ready;
++ release.set_value();auto rc=call.get();h.m_deferredOriginal.drain();entered=nullptr;
++ if(early || rc!=VK_SUCCESS)return 4;
++ std::puts("PASS 2x/3x/4x same-call driver results, caller-thread queue access, SUBOPTIMAL, errors and null pResults");
++}
++'''
++p=Path('/work/present-call-boundary.cpp');p.write_text(fixture)
++subprocess.run(['g++','-std=c++20','-pthread','-Wall','-Wextra','-Werror','-Wno-missing-field-initializers','-I'+str(root/'thirdparty'),'-I'+str(root/'lsfg-vk-layer/src/modes'),str(p),'-o','/work/present-call-boundary'],check=True)
++subprocess.run(['/work/present-call-boundary'],check=True,timeout=10)
 --- /dev/null
 +++ b/tests/present_results_regression.py
 @@ -0,0 +1,199 @@
@@ -2756,6 +2859,33 @@
 +    for(int i=0;i<35;++i){n=c.update(n?100:1000.0/30,1,72,true);accepted &= n==0;}
 +    check(accepted,"materially worse workload can retry a rejected backoff");
 +    return errors?1:0;
++}
+--- /dev/null
++++ b/tests/recovery_retry_reset_test.cpp
+@@ -0,0 +1,24 @@
++#include "recovery_controller.hpp"
++#include <cassert>
++#include <string_view>
++#include <cstdio>
++using lsfgvk::layer::RecoveryController;
++int main(){
++ RecoveryController c;unsigned n=c.update(0,1,72,true);
++ // Reject 2x -> native: 40 total FPS vs 33, preserving 2x.
++ for(int i=0;i<1500;++i)n=c.update(n?50:30,1,72,true);
++ assert(n==1);
++ // After the cooldown, worsened 2x workload makes native profitable.
++ bool reduced=false;
++ for(int i=0;i<500;++i){n=c.update(n?90:30,1,72,true);if(n==0 && std::string_view(c.phase())=="reduced"){reduced=true;break;}}
++ assert(reduced);
++ // Recover to 2x under a lighter workload that would not pass the old 57.5ms gate.
++ bool recovered=false;
++ for(int i=0;i<1000;++i){n=c.update(n?40:30,1,72,true);if(n==1 && std::string_view(c.phase())=="steady"){recovered=true;break;}}
++ assert(recovered);
++ // New native cost improves enough that 50ms -> 20ms is now beneficial.
++ bool retried=false;
++ for(int i=0;i<600;++i){n=c.update(n?50:20,1,72,true);if(n==0 && std::string_view(c.phase())=="reduced"){retried=true;break;}}
++ if(!retried){std::puts("FAIL successful retry leaves stale failed-backoff latch");return 1;}
++ std::puts("PASS successful backoff clears old rejection before later workloads");
 +}
 --- /dev/null
 +++ b/tests/recovery_scenarios_test.cpp
