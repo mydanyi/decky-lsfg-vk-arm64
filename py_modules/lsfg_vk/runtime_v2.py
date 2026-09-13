@@ -41,7 +41,9 @@ def runtime_toml(config: dict) -> str:
     lines.extend(['', '[[profile]]', f'name = "{RUNTIME_PROFILE}"',
                   'pacing_mode = "vsync"', 'override_present_mode = true',
                   f'multiplier = {multiplier}', f'flow_scale = {flow}',
-                  f'performance_mode = {boolean(config.get("performance_mode", False))}', ''])
+                  f'performance_mode = {boolean(config.get("performance_mode", False))}',
+                  f'adaptive_recovery = {boolean(config.get("adaptive_recovery", True))}',
+                  f'recovery_base_fps = {max(0, int(config.get("dxvk_frame_rate", 0)))}', ''])
     return '\n'.join(lines)
 
 

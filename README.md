@@ -10,6 +10,8 @@ A Decky frame generation plugin for **Armada ARM64**, based on [Decky LSFG-VK](h
 
 - Simplified Chinese interface with controls for the frame generation multiplier, flow scale, performance mode, and configuration profiles.
 - Base FPS limit support for D3D9, D3D10, D3D11, and D3D12 through DXVK / VKD3D launch paths.
+- Overload Backoff and Cadence Recovery is enabled by default, below Performance Mode. It supports submission pacing at 2x, 3x and 4x, reduces generation during sustained slowdown, and attempts recovery when stable. Saved multiplier and Base FPS Cap settings are retained; original-only output may occur temporarily. Existing explicit off settings are preserved.
+- Portable copied launch options: `~/lsfg-arm64 %command%`.
 - A modified ARM64 frame generation runtime bundled in the release ZIP and installed automatically by the plugin.
 - Separate plugin name, configuration, launch script, and Vulkan layer, allowing this version to coexist with **Decky LSFG-VK**.
 - GPU-based frame generation.
@@ -30,7 +32,7 @@ The release includes the ARM64 runtime but does not include the commercial `lsfg
 
 ## Development
 
-The source repository contains the Decky plugin. Release ZIPs additionally bundle the modified ARM64 native runtime. The frontend build produces `dist/index.js`; it does not compile the native runtime.
+The source repository contains the Decky plugin and [native runtime patches](native/README.md). Release ZIPs additionally bundle the modified ARM64 native runtime. The frontend build produces `dist/index.js`; it does not compile the native runtime.
 
 Use the committed lockfile. Backend development requires Python 3.11+ and Bash on Linux.
 

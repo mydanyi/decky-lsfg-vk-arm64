@@ -17,6 +17,7 @@ DLL = "dll"
 NO_FP16 = "no_fp16"
 MULTIPLIER = "multiplier"
 FLOW_SCALE = "flow_scale"
+ADAPTIVE_RECOVERY = "adaptive_recovery"
 PERFORMANCE_MODE = "performance_mode"
 HDR_MODE = "hdr_mode"
 EXPERIMENTAL_PRESENT_MODE = "experimental_present_mode"
@@ -36,6 +37,7 @@ class ConfigurationData(TypedDict):
     no_fp16: bool
     multiplier: int
     flow_scale: float
+    adaptive_recovery: bool
     performance_mode: bool
     hdr_mode: bool
     experimental_present_mode: str
@@ -126,4 +128,4 @@ def get_script_generation_logic():
     return generate_script_lines
 
 
-ALL_FIELDS = ['dll', 'no_fp16', 'multiplier', 'flow_scale', 'performance_mode', 'hdr_mode', 'experimental_present_mode', 'dxvk_frame_rate', 'enable_wow64', 'disable_steamdeck_mode', 'mangohud_workaround', 'disable_vkbasalt', 'force_enable_vkbasalt', 'enable_wsi', 'enable_zink']
+ALL_FIELDS = ['dll', 'no_fp16', 'multiplier', 'flow_scale', 'adaptive_recovery', 'performance_mode', 'hdr_mode', 'experimental_present_mode', 'dxvk_frame_rate', 'enable_wow64', 'disable_steamdeck_mode', 'mangohud_workaround', 'disable_vkbasalt', 'force_enable_vkbasalt', 'enable_wsi', 'enable_zink']

@@ -158,5 +158,7 @@
   "TOAST_PROFILE_SWITCH_FAILED_TITLE": "切换配置档失败",
   "TOAST_PROFILE_SWITCH_ERROR_TITLE": "切换配置档出错",
   "TOAST_PROFILE_UPDATE_FAILED_TITLE": "更新配置档配置失败",
-  "TOAST_PROFILE_UPDATE_ERROR_TITLE": "更新配置档配置出错"
+  "TOAST_PROFILE_UPDATE_ERROR_TITLE": "更新配置档配置出错",
+  "CONFIG_ADAPTIVE_RECOVERY": "过载退让与帧节奏恢复",
+  "CONFIG_ADAPTIVE_RECOVERY_DESC": "持续变慢时减少补帧，稳定后尝试恢复，期间可能暂时只显示原始帧。保留你设置的基础 FPS 上限。"
 }

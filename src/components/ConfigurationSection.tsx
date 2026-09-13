@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { RiArrowDownSFill, RiArrowUpSFill } from "react-icons/ri";
 import { ConfigurationData } from "../config/configSchema";
 import {
-  FLOW_SCALE, NO_FP16, PERFORMANCE_MODE,
+  FLOW_SCALE, NO_FP16, PERFORMANCE_MODE, ADAPTIVE_RECOVERY,
   DXVK_FRAME_RATE, DISABLE_STEAMDECK_MODE,
   MANGOHUD_WORKAROUND, DISABLE_VKBASALT, FORCE_ENABLE_VKBASALT, ENABLE_WSI, ENABLE_ZINK
 } from "../config/generatedConfigSchema";
@@ -171,6 +171,15 @@ export function ConfigurationSection({
               description={t('CONFIG_PERFORMANCE_MODE_DESC', 'Uses a lighter model for FG (Recommended for most games)')}
               checked={config.performance_mode}
               onChange={(value) => onConfigChange(PERFORMANCE_MODE, value)}
+            />
+          </PanelSectionRow>
+
+          <PanelSectionRow>
+            <ToggleField
+              label={t('CONFIG_ADAPTIVE_RECOVERY', 'Overload Backoff and Cadence Recovery')}
+              description={t('CONFIG_ADAPTIVE_RECOVERY_DESC', 'Reduce generated frames during sustained slowdown and retry when stable. May temporarily show only original frames. Keeps your Base FPS Cap.')}
+              checked={config.adaptive_recovery ?? true}
+              onChange={(value) => onConfigChange(ADAPTIVE_RECOVERY, value)}
             />
           </PanelSectionRow>
         </>

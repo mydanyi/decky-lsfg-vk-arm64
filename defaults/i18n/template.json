@@ -158,5 +158,7 @@
   "TOAST_PROFILE_SWITCH_FAILED_TITLE": "Failed to switch profile",
   "TOAST_PROFILE_SWITCH_ERROR_TITLE": "Error switching profile",
   "TOAST_PROFILE_UPDATE_FAILED_TITLE": "Failed to update profile config",
-  "TOAST_PROFILE_UPDATE_ERROR_TITLE": "Error updating profile config"
+  "TOAST_PROFILE_UPDATE_ERROR_TITLE": "Error updating profile config",
+  "CONFIG_ADAPTIVE_RECOVERY": "Overload Backoff and Cadence Recovery",
+  "CONFIG_ADAPTIVE_RECOVERY_DESC": "Reduce generated frames during sustained slowdown and retry when stable. May temporarily show only original frames. Keeps your Base FPS Cap."
 }
