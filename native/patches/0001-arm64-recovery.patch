@@ -1,0 +1,2950 @@
+--- a/lsfg-vk-config/include/lsfg-vk-utils/config.hpp
++++ b/lsfg-vk-config/include/lsfg-vk-utils/config.hpp
+@@ -53,6 +53,8 @@
+         uint32_t multiplier{2};
+         float flowScale{1.0F};
+         bool performanceMode{false};
++        bool adaptiveRecovery{false};
++        uint32_t recoveryBaseFps{0};
+ 
+         bool overridePresentMode{true}; //!< When using "Vsync" pacing mode, override to fifo
+         bool preserveSwapchainImageCount{false}; //!< When using "Vsync" pacing mode, don't edit
+--- a/lsfg-vk-config/src/config.cpp
++++ b/lsfg-vk-config/src/config.cpp
+@@ -279,6 +279,10 @@
+                 profile.flowScale = get<float>(key, value);
+             else if (key == "performance_mode")
+                 profile.performanceMode = get<bool>(key, value);
++            else if (key == "adaptive_recovery")
++                profile.adaptiveRecovery = get<bool>(key, value);
++            else if (key == "recovery_base_fps")
++                profile.recoveryBaseFps = get<uint32_t>(key, value);
+             else if (key == "override_present_mode")
+                 profile.overridePresentMode = get<bool>(key, value);
+             else if (key == "preserve_swapchain_image_count")
+@@ -353,6 +357,8 @@
+         profileTbl.insert("multiplier", static_cast<int64_t>(profile.multiplier));
+         profileTbl.insert("flow_scale", profile.flowScale);
+         profileTbl.insert("performance_mode", profile.performanceMode);
++        profileTbl.insert("adaptive_recovery", profile.adaptiveRecovery);
++        profileTbl.insert("recovery_base_fps", profile.recoveryBaseFps);
+         profileTbl.insert("override_present_mode", profile.overridePresentMode);
+         profileTbl.insert("preserve_swapchain_image_count", profile.preserveSwapchainImageCount);
+         profiles.push_back(profileTbl);
+--- a/lsfg-vk-layer/src/hooks.cpp
++++ b/lsfg-vk-layer/src/hooks.cpp
+@@ -81,6 +81,11 @@
+     for (const auto& profile : config->profiles) {
+         if (profile.name != this->m_profile.name)
+             continue;
++        const bool rebuild = this->m_profile.multiplier != profile.multiplier ||
++            this->m_profile.flowScale != profile.flowScale ||
++            this->m_profile.performanceMode != profile.performanceMode;
++        this->m_profile.adaptiveRecovery = profile.adaptiveRecovery;
++        this->m_profile.recoveryBaseFps = profile.recoveryBaseFps;
+         this->m_profile.multiplier = profile.multiplier;
+         this->m_profile.flowScale = profile.flowScale;
+         this->m_profile.performanceMode = profile.performanceMode;
+@@ -88,7 +93,7 @@
+ 
+         layer::setLevel(this->m_configuration.logLevel);
+ 
+-        return true;
++        return rebuild;
+     }
+ 
+     return false; // Profile no longer exists, keep using the old one.
+--- a/lsfg-vk-layer/src/hooks.hpp
++++ b/lsfg-vk-layer/src/hooks.hpp
+@@ -203,6 +203,7 @@
+         Swapchain(Swapchain&&) = delete;
+         Swapchain& operator=(Swapchain&&) = delete;
+         virtual ~Swapchain();
++        virtual VkResult drainPending() { return VK_SUCCESS; }
+     protected:
+         std::reference_wrapper<Layer> m_layer;
+         std::reference_wrapper<Instance> m_instance;
+--- a/lsfg-vk-layer/src/layer.cpp
++++ b/lsfg-vk-layer/src/layer.cpp
+@@ -1,6 +1,7 @@
+ /* SPDX-License-Identifier: CC-BY-NC-ND-4.0 */
+ 
+ #include "hooks.hpp"
++#include "queue_guard.hpp"
+ #include "logger.hpp"
+ 
+ #include <cstdint>
+@@ -376,6 +377,9 @@
+ 
+             const auto funcIt{global->funcMap.find(std::string_view(name))};
+             if (funcIt != global->funcMap.end()) {
++                if ((std::string_view(name) == "vkQueueSubmit2" ||
++                     std::string_view(name) == "vkQueueSubmit2KHR") &&
++                    !it->second->GetDeviceProcAddr(device, name)) return nullptr;
+                 return funcIt->second;
+             }
+ 
+@@ -398,6 +402,7 @@
+ 
+             DestroyDevice = it->second->DestroyDevice;
+ 
++            layer::forgetDeviceQueues(device);
+             global->devices.erase(it);
+         }
+ 
+@@ -407,6 +412,7 @@
+     /// Data associated with each swapchain
+     struct SwapchainData {
+         VkSwapchainKHR swapchain;
++        VkDevice device;
+         PFN_vkDestroySwapchainKHR DestroySwapchain;
+         std::unique_ptr<layer::Swapchain> layer;
+ 
+@@ -471,6 +477,7 @@
+ 
+             global->swapchains.emplace(*swapchain, std::make_unique<SwapchainData>(SwapchainData {
+                 .swapchain = *swapchain,
++                .device = device,
+                 .DestroySwapchain = DestroySwapchain,
+                 .layer = std::move(layerSwapchain),
+ 
+@@ -486,6 +493,87 @@
+         }
+ 
+         return VK_SUCCESS;
++    }
++
++    DeviceData* queueDevice(VkQueue queue) {
++        const void* key = *reinterpret_cast<void* const*>(queue);
++        for (const auto& [handle, data] : global->devices) {
++            if (*reinterpret_cast<void* const*>(handle) == key) return data.get();
++        }
++        return nullptr;
++    }
++
++    void drainDevicePresents(VkDevice device) {
++        for (const auto& [handle, data] : global->swapchains) {
++            (void)handle;
++            if (data->device != device || !data->layer) continue;
++            (void)data->layer->drainPending();
++        }
++    }
++
++    template<class Fn, class... Args>
++    VkResult forwardQueue(const char* name, VkQueue queue, Args... args) {
++        try {
++        const std::shared_lock lock(global->mutex);
++        const auto* data = queueDevice(queue);
++        if (!data) return VK_ERROR_INITIALIZATION_FAILED;
++        const auto fn = reinterpret_cast<Fn>(data->GetDeviceProcAddr(data->device, name));
++        if (!fn) return VK_ERROR_EXTENSION_NOT_PRESENT;
++        const auto queueMutex = layer::queueHostMutex(queue);
++        const std::lock_guard queueLock(*queueMutex);
++        return fn(queue, args...);
++            } catch (const std::bad_alloc&) {
++            return VK_ERROR_OUT_OF_HOST_MEMORY;
++        }
++    }
++
++    VkResult myvkQueueSubmit(VkQueue queue, uint32_t count,
++                            const VkSubmitInfo* info, VkFence fence) {
++        return forwardQueue<PFN_vkQueueSubmit>("vkQueueSubmit", queue, count, info, fence);
++    }
++    VkResult myvkQueueSubmit2(VkQueue queue, uint32_t count,
++                             const VkSubmitInfo2* info, VkFence fence) {
++        return forwardQueue<PFN_vkQueueSubmit2>("vkQueueSubmit2", queue, count, info, fence);
++    }
++    VkResult myvkQueueSubmit2KHR(VkQueue queue, uint32_t count,
++                                const VkSubmitInfo2* info, VkFence fence) {
++        return forwardQueue<PFN_vkQueueSubmit2KHR>("vkQueueSubmit2KHR", queue, count, info, fence);
++    }
++    VkResult myvkQueueBindSparse(VkQueue queue, uint32_t count,
++                                const VkBindSparseInfo* info, VkFence fence) {
++        return forwardQueue<PFN_vkQueueBindSparse>("vkQueueBindSparse", queue, count, info, fence);
++    }
++    VkResult myvkQueueWaitIdle(VkQueue queue) {
++        try {
++        const std::shared_lock lock(global->mutex);
++        const auto* data = queueDevice(queue);
++        if (!data) return VK_ERROR_INITIALIZATION_FAILED;
++        drainDevicePresents(data->device);
++        const auto fn = reinterpret_cast<PFN_vkQueueWaitIdle>(
++            data->GetDeviceProcAddr(data->device, "vkQueueWaitIdle"));
++        const auto queueMutex = layer::queueHostMutex(queue);
++        const std::lock_guard queueLock(*queueMutex);
++        return fn(queue);
++            } catch (const std::bad_alloc&) {
++            return VK_ERROR_OUT_OF_HOST_MEMORY;
++        }
++    }
++    VkResult myvkDeviceWaitIdle(VkDevice device) {
++        try {
++        const std::shared_lock lock(global->mutex);
++        const auto it = global->devices.find(device);
++        if (it == global->devices.end()) return VK_ERROR_INITIALIZATION_FAILED;
++        drainDevicePresents(device);
++        const auto fn = reinterpret_cast<PFN_vkDeviceWaitIdle>(
++            it->second->GetDeviceProcAddr(device, "vkDeviceWaitIdle"));
++        // Device idle requires external host synchronization of every queue.
++        const auto mutexes = layer::deviceQueueMutexes(device);
++        std::vector<std::unique_lock<std::mutex>> locks;
++        for (const auto& mutex : mutexes) locks.emplace_back(*mutex);
++        return fn(device);
++            } catch (const std::bad_alloc&) {
++            return VK_ERROR_OUT_OF_HOST_MEMORY;
++        }
+     }
+ 
+     /// Destroy swapchain
+@@ -563,6 +651,11 @@
+         // If disabled, call the next layer's function directly
+         const P ptr{data->*pointer};
+         if (!data->layer) {
++            if constexpr (std::is_same_v<V, VkQueue>) {
++                const auto queueMutex = layer::queueHostMutex(vktype0);
++        const std::lock_guard queueLock(*queueMutex);
++                return ptr(vktype0, vktype1, std::forward<Args>(args)...);
++            }
+             return ptr(vktype0, vktype1, std::forward<Args>(args)...);
+         }
+ 
+@@ -643,6 +736,12 @@
+ 
+                 { "vkGetPhysicalDeviceSurfaceSupportKHR", VK(
+                     myvkGetPhysicalDeviceSurfaceSupportKHR) },
++                { "vkQueueSubmit", VK(myvkQueueSubmit) },
++                { "vkQueueSubmit2", VK(myvkQueueSubmit2) },
++                { "vkQueueSubmit2KHR", VK(myvkQueueSubmit2KHR) },
++                { "vkQueueBindSparse", VK(myvkQueueBindSparse) },
++                { "vkQueueWaitIdle", VK(myvkQueueWaitIdle) },
++                { "vkDeviceWaitIdle", VK(myvkDeviceWaitIdle) },
+                 { "vkQueuePresentKHR", VK(
+                     myvkQueuePresentKHR) }
+             },
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/deferred_present.hpp
+@@ -0,0 +1,111 @@
++/* SPDX-License-Identifier: CC-BY-NC-ND-4.0 */
++#pragma once
++
++#include <condition_variable>
++#include <cstddef>
++#include <deque>
++#include <functional>
++#include <mutex>
++#include <thread>
++#include <utility>
++
++namespace lsfgvk::layer {
++
++class DeferredPresent {
++public:
++    DeferredPresent() = default;
++    DeferredPresent(const DeferredPresent&) = delete;
++    DeferredPresent& operator=(const DeferredPresent&) = delete;
++
++    ~DeferredPresent() {
++        {
++            std::unique_lock<std::mutex> lock(mutex_);
++            idleCv_.wait(lock, [this] { return pending_ == 0; });
++            stopping_ = true;
++        }
++        cv_.notify_all();
++        if (worker_.joinable()) worker_.join();
++    }
++
++    bool submit(std::function<int()> job) {
++        return enqueue(std::move(job), false);
++    }
++
++    bool append(std::function<int()> job) {
++        return enqueue(std::move(job), true);
++    }
++
++    int drain() {
++        std::unique_lock<std::mutex> lock(mutex_);
++        idleCv_.wait(lock, [this] { return pending_ == 0; });
++        return sticky_;
++    }
++
++private:
++    static constexpr std::size_t kMaxPending = 3;
++
++    bool enqueue(std::function<int()> job, bool allowBusy) {
++        std::unique_lock<std::mutex> lock(mutex_);
++        if (stopping_ || sticky_ != 0) return false;
++        if (!allowBusy && pending_ != 0) return false;
++        if (pending_ >= kMaxPending) return false;
++
++        if (!worker_.joinable()) {
++            try {
++                worker_ = std::thread([this] { run(); });
++            } catch (...) {
++                return false;
++            }
++        }
++
++        try {
++            tasks_.push_back(std::move(job));
++        } catch (...) {
++            return false;
++        }
++
++        ++pending_;
++        cv_.notify_one();
++        return true;
++    }
++
++    void run() {
++        for (;;) {
++            std::function<int()> job;
++            {
++                std::unique_lock<std::mutex> lock(mutex_);
++                cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
++                if (tasks_.empty()) {
++                    if (stopping_) return;
++                    continue;
++                }
++                job = std::move(tasks_.front());
++                tasks_.pop_front();
++            }
++
++            int result = -1;
++            try {
++                result = job();
++            } catch (...) {
++                result = -1;
++            }
++
++            {
++                std::unique_lock<std::mutex> lock(mutex_);
++                if (result != 0 && sticky_ == 0) sticky_ = result;
++                if (--pending_ == 0) idleCv_.notify_all();
++            }
++        }
++    }
++
++    std::mutex mutex_;
++    std::condition_variable cv_;
++    std::condition_variable idleCv_;
++    std::deque<std::function<int()>> tasks_;
++    std::size_t pending_ = 0;
++    int sticky_ = 0;
++    bool stopping_ = false;
++    std::thread worker_;
++};
++
++} // namespace lsfgvk::layer
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/output_smoother.hpp
+@@ -0,0 +1,288 @@
++#pragma once
++
++// lsfgvk::layer::OutputSmoother
++//
++// Pure policy state machine for bounded experimental 2x/3x/4x submission smoothing.
++// It tracks observed QueuePresent cycle durations and derives a small pacing
++// gap. It performs no clocks, sleeps, or Vulkan calls, and makes no claim of
++// physical scanout or real FPS; it only yields a bounded policy gap.
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++
++namespace lsfgvk {
++namespace layer {
++
++class OutputSmoother {
++public:
++    OutputSmoother() { reset(); }
++
++    // Full configuration reset: clears all measurement state and the
++    // rejection latch.
++    void reset() {
++        enabled_ = false;
++        capFps_ = 0;
++        outputs_ = 2;
++        haveConfig_ = false;
++        rejected_ = false;
++        rejectionTrialMean_ = 0.0;
++        rejectionReference_ = 0.0;
++        confirmedRejection_ = false;
++        phase_ = Phase::Idle;
++        settleRemaining_ = 0;
++        baseline_ = 0.0;
++        gap_ = 0.0;
++        accumMs_ = 0.0;
++        accumSamples_ = 0;
++        attempt_ = 0;
++    }
++
++    // elapsedMs: cycle duration between original QueuePresent calls (>0, <=250).
++    double update(double elapsedMs, bool enabled, unsigned capFps, bool eligible = true,
++                  unsigned outputs = 2) {
++        // Config transition. Pausing preserves the rejection latch; an enable
++        // transition or a cap change is a config reset that clears it.
++        outputs = std::clamp(outputs, 2u, 4u);
++        if (!haveConfig_ || enabled != enabled_ || capFps != capFps_ || outputs != outputs_) {
++            const bool pause = haveConfig_ && !enabled;
++            if (pause) {
++                discardWindow();
++            } else {
++                resetMeasurement();
++            }
++            enabled_ = enabled;
++            capFps_ = capFps;
++            outputs_ = outputs;
++            haveConfig_ = true;
++        }
++
++        if (!enabled) {
++            phase_ = Phase::Disabled;
++            gap_ = 0.0;
++            return 0.0;
++        }
++
++        if (rejected_) {
++            phase_ = Phase::Rejected;
++            gap_ = 0.0;
++            return observeRejected(elapsedMs, eligible);
++        }
++
++        // Temporary native backoff is not an explicit user configuration
++        // change. Discard stale timing while preserving any rejection latch.
++        if (!eligible) {
++            resetMeasurement();
++            return 0.0;
++        }
++
++        // Only accept valid samples.
++        if (!std::isfinite(elapsedMs) || !(elapsedMs > 0.0) ||
++            elapsedMs > kMaxSampleMs) {
++            resetMeasurement();
++            return 0.0;
++        }
++
++        // Skip the settling frames after a mode change.
++        if (settleRemaining_ > 0) {
++            --settleRemaining_;
++            return gap_;
++        }
++
++        accumMs_ += elapsedMs;
++        ++accumSamples_;
++
++        if (accumMs_ >= kWindowMs && accumSamples_ >= kWindowSamples) {
++            const double mean = accumMs_ / static_cast<double>(accumSamples_);
++
++            if (phase_ == Phase::Warmup || phase_ == Phase::Idle) {
++                // Learn the source period and divide by the actual output count.
++                baseline_ = mean;
++                gap_ = std::min(kGapCapMs, baseline_ / outputs_);
++                attempt_ = 0;
++                phase_ = Phase::Trial;
++                startWindow();
++            } else {
++                startWindow();
++                evaluateWindow(mean);
++            }
++        }
++
++        return gap_;
++    }
++
++    double gapMs() const { return gap_; }
++    double sourcePeriodMs() const { return baseline_; }
++    unsigned outputCount() const { return outputs_; }
++
++    const char* phase() const {
++        switch (phase_) {
++            case Phase::Disabled: return "disabled";
++            case Phase::Warmup:   return "warmup";
++            case Phase::Trial:    return "trial";
++            case Phase::Active:   return "active";
++            case Phase::Rejected: return "rejected";
++            case Phase::Idle:
++            default:              return "idle";
++        }
++    }
++
++    // Deadline for an already-blocked present. Never adds delay when late,
++    // and rejects non-finite times by returning now.
++    static double deadlineMs(double generatedStart, double gap, double now) {
++        if (!std::isfinite(generatedStart) || !std::isfinite(gap) ||
++            !std::isfinite(now)) {
++            return now;
++        }
++        return std::max(now, generatedStart + gap);
++    }
++
++private:
++    enum class Phase : std::uint8_t {
++        Idle,
++        Disabled,
++        Warmup,
++        Trial,
++        Active,
++        Rejected
++    };
++
++    static constexpr double kMaxSampleMs = 250.0;
++    static constexpr double kWindowMs = 1000.0;
++    static constexpr unsigned kWindowSamples = 12;
++    static constexpr unsigned kSettleSamples = 3;
++    static constexpr double kGapCapMs = 25.0;
++    static constexpr double kRejectRatio = 0.95; // reject when mean > baseline / 0.95
++    static constexpr double kRelaxRatio = 0.85;  // relax when mean < baseline * 0.85
++    static constexpr unsigned kMaxAttempts = 3;  // initial, half, quarter
++
++    void startWindow() {
++        accumMs_ = 0.0;
++        accumSamples_ = 0;
++        settleRemaining_ = kSettleSamples;
++    }
++
++    void discardWindow() { startWindow(); }
++
++    void resetMeasurement() {
++        rejected_ = false;
++        rejectionTrialMean_ = 0.0;
++        rejectionReference_ = 0.0;
++        confirmedRejection_ = false;
++        baseline_ = 0.0;
++        gap_ = 0.0;
++        attempt_ = 0;
++        phase_ = Phase::Warmup;
++        startWindow();
++    }
++
++    double observeRejected(double elapsedMs, bool eligible)
++    {
++        if (!eligible)
++        {
++            startWindow();
++            return 0.0;
++        }
++
++        if (!std::isfinite(elapsedMs) || !(elapsedMs > 0.0) || elapsedMs > kMaxSampleMs)
++        {
++            startWindow();
++            return 0.0;
++        }
++
++        if (settleRemaining_ > 0) {
++            --settleRemaining_;
++            return 0.0;
++        }
++
++        accumMs_ += elapsedMs;
++        ++accumSamples_;
++
++        if (accumMs_ < kWindowMs || accumSamples_ < kWindowSamples)
++        {
++            return 0.0;
++        }
++
++        const double mean = accumMs_ / static_cast<double>(accumSamples_);
++
++        if (!confirmedRejection_)
++        {
++            if (mean >= rejectionTrialMean_ * kRejectRatio)
++            {
++                resetMeasurement();
++                baseline_ = mean;
++                gap_ = std::min(kGapCapMs, mean / outputs_);
++                phase_ = Phase::Trial;
++                startWindow();
++                return gap_;
++            }
++
++            confirmedRejection_ = true;
++            rejectionReference_ = mean;
++            startWindow();
++            return 0.0;
++        }
++
++        if (rejectionReference_ > 0.0 &&
++            std::abs(mean / rejectionReference_ - 1.0) > 0.15)
++        {
++            resetMeasurement();
++            baseline_ = mean;
++            gap_ = std::min(kGapCapMs, mean / outputs_);
++            phase_ = Phase::Trial;
++            startWindow();
++            return gap_;
++        }
++
++        startWindow();
++        return 0.0;
++    }
++
++    double rejectionTrialMean_ = 0.0;
++    double rejectionReference_ = 0.0;
++    bool confirmedRejection_ = false;
++
++    void evaluateWindow(double mean) {
++        if (phase_ == Phase::Trial || phase_ == Phase::Active) {
++            if (mean > baseline_ / kRejectRatio) {
++                // Current gap insufficient: halve it (initial -> half ->
++                // quarter). A third failed window rejects.
++                ++attempt_;
++                if (attempt_ < kMaxAttempts) {
++                    gap_ *= 0.5;
++                } else {
++                    gap_ = 0.0;
++                    rejected_ = true;
++                    rejectionTrialMean_ = mean;
++                    rejectionReference_ = 0.0;
++                    confirmedRejection_ = false;
++                    phase_ = Phase::Rejected;
++                }
++            } else {
++                phase_ = Phase::Active;
++                if (mean < baseline_ * kRelaxRatio) {
++                    baseline_ = mean;
++                    gap_ = std::min(gap_, baseline_ / outputs_);
++                }
++            }
++            return;
++        }
++    }
++
++    bool enabled_ = false;
++    unsigned capFps_ = 0;
++    unsigned outputs_ = 2;
++    bool haveConfig_ = false;
++    bool rejected_ = false;
++    Phase phase_ = Phase::Idle;
++
++    unsigned settleRemaining_ = 0;
++    double baseline_ = 0.0;
++    double gap_ = 0.0;
++    double accumMs_ = 0.0;
++    unsigned accumSamples_ = 0;
++    unsigned attempt_ = 0;
++};
++
++} // namespace layer
++} // namespace lsfgvk
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/pair_pacer.hpp
+@@ -0,0 +1,65 @@
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <optional>
++
++namespace lsfgvk::layer {
++
++// Scheduling principle informed by MAKO RealFramePacer e8043da;
++// this is adapted paired scheduling, not an upstream literal implementation.
++class PairPacer {
++public:
++    explicit PairPacer(std::int64_t halfPeriod)
++        : H(halfPeriod), M(std::max<std::int64_t>(1, H / 2)), T(2 * H) {}
++
++    std::int64_t generatedDeadline(std::int64_t ready) const {
++        if (!B)
++            return ready;
++
++        return std::max({ready, *B + H, *L + M});
++    }
++
++    std::int64_t originalDeadline(std::int64_t actualGenStart) {
++        if (B && actualGenStart <= *B + T - M) {
++            pendingOriginalDeadline = *B + T;
++            pendingRebase = false;
++        } else {
++            pendingOriginalDeadline = actualGenStart + H;
++            pendingRebase = true;
++        }
++
++        return *pendingOriginalDeadline;
++    }
++
++    void recordOriginal(std::int64_t actualOrigStart) {
++        if (!B || !pendingOriginalDeadline || pendingRebase ||
++            actualOrigStart > *pendingOriginalDeadline + H - M) {
++            B = actualOrigStart;
++        } else {
++            B = *pendingOriginalDeadline;
++        }
++
++        L = actualOrigStart;
++        pendingOriginalDeadline.reset();
++        pendingRebase = false;
++    }
++
++    void reset() {
++        B.reset();
++        L.reset();
++        pendingOriginalDeadline.reset();
++        pendingRebase = false;
++    }
++
++private:
++    std::int64_t H;
++    std::int64_t M;
++    std::int64_t T;
++    std::optional<std::int64_t> B;
++    std::optional<std::int64_t> L;
++    std::optional<std::int64_t> pendingOriginalDeadline;
++    bool pendingRebase = false;
++};
++
++} // namespace lsfgvk::layer
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/present_schedule.hpp
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: CC-BY-NC-ND-4.0 */
++#pragma once
++#include <algorithm>
++#include <cstdint>
++namespace lsfgvk::layer {
++// Used by one worker in order. Late frames rebase the following deadline.
++class PresentSchedule {
++public:
++    PresentSchedule(int64_t firstNs, int64_t gapNs) : lastNs_(firstNs), gapNs_(gapNs) {}
++    int64_t deadline(int64_t nowNs) const {
++        return enabled_ ? std::max(nowNs, lastNs_ + gapNs_) : nowNs;
++    }
++    void record(int64_t actualNs) { lastNs_ = actualNs; }
++    void missingReadiness() { enabled_ = false; }
++    int64_t lastNs() const { return lastNs_; }
++private:
++    int64_t lastNs_, gapNs_;
++    bool enabled_{true};
++};
++}
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/recovery_controller.hpp
+@@ -0,0 +1,133 @@
++#pragma once
++#include <algorithm>
++#include <cmath>
++#include "recovery_predicate.hpp"
++
++namespace lsfgvk::layer {
++// Complete real-frame cycles include FIFO backpressure, not just GPU execution.
++class RecoveryController {
++public:
++    void reset() { *this = RecoveryController{}; }
++    unsigned update(double elapsedMs, unsigned requested, unsigned capFps, bool enabled) {
++        if (!m_initialized || requested != m_requested || capFps != m_cap || enabled != m_enabled) {
++            reset();
++            m_initialized = true;
++            m_requested = requested;
++            m_cap = capFps;
++            m_enabled = enabled;
++            m_current = m_committed = requested;
++            return m_current;
++        }
++        if (!enabled || !requested) return requested;
++        if (!std::isfinite(elapsedMs) || elapsedMs <= 0.0 || elapsedMs > 250.0) {
++            // Loading/resume is not evidence of sustained overload.
++            m_current = m_committed;
++            m_state = State::Steady;
++            m_slowWindows = 0;
++            m_worseWindows = 0;
++            clearWindow();
++            m_skip = 3;
++            m_nextTry = m_clock + 4000.0;
++            m_nextProbe = m_clock + 8000.0;
++            return m_current;
++        }
++        m_clock += elapsedMs;
++        if (m_skip) { --m_skip; return m_current; }
++        m_windowMs += elapsedMs;
++        ++m_samples;
++        if (m_windowMs < 500.0 || m_samples < 6) return m_current;
++        const double mean = m_windowMs / m_samples;
++        clearWindow();
++        if (m_state == State::DownTrial || m_state == State::NativeProbe) {
++            const double threshold = m_state == State::NativeProbe ? 0.75 : 0.85;
++            const double outputRatio = m_current ? 0.98 : 1.10;
++            if (mean <= m_beforeMs * threshold &&
++                outputCadenceImproves(m_beforeMs, m_committed, mean, m_current, outputRatio)) {
++                m_committed = m_current;
++                m_latestMs = mean;
++                if (!m_cap) m_referenceMs = mean;
++                m_retryMs = 4000.0;
++                m_nextTry = m_clock + m_retryMs;
++                m_state = State::Steady;
++            } else if (m_state == State::DownTrial && m_current > 0) {
++                // Fixed optical-flow cost can hide the benefit of one small step.
++                // Bound the search by the remaining levels and compare the whole
++                // probe to its original baseline before accepting or rolling back.
++                beginTrial(State::DownTrial, m_current - 1, m_beforeMs);
++            } else rejectTrial();
++            return m_current;
++        }
++        if (m_state == State::UpTrial) {
++            if (outputCadenceImproves(m_beforeMs, m_committed, mean, m_current, 1.05)) {
++                m_committed = m_current;
++                m_latestMs = mean;
++                m_retryMs = 4000.0;
++                m_nextTry = m_clock + m_retryMs;
++                m_nextProbe = m_clock + 8000.0;
++                m_state = State::Steady;
++            } else rejectTrial();
++            return m_current;
++        }
++        m_latestMs = mean;
++        if (m_referenceMs == 0.0) m_referenceMs = mean;
++        const double reference = m_cap ? 1000.0 / m_cap : m_referenceMs;
++        if (mean > reference * 1.25) m_slowWindows = std::min(2u, m_slowWindows + 1);
++        else {
++            m_slowWindows = 0;
++            if (!m_cap) m_referenceMs = std::min(m_referenceMs, mean);
++        }
++        if (m_failedDownMs && mean > m_failedDownMs * 1.15)
++            m_worseWindows = std::min(4u, m_worseWindows + 1);
++        else m_worseWindows = 0;
++        const bool retryDown = !m_cap || !m_failedDownMs ||
++            (m_worseWindows >= 4 && m_clock >= m_nextDownTry);
++        if (m_current && m_slowWindows >= 2 && m_clock >= m_nextTry && retryDown) {
++            beginTrial(State::DownTrial, m_current - 1, mean);
++        } else if (m_current < m_requested && m_clock >= m_nextTry) {
++            beginTrial(State::UpTrial, m_current + 1, m_latestMs);
++        } else if (!m_cap && m_current == m_requested && m_clock >= m_nextProbe && m_clock >= m_nextTry) {
++            // FIFO can hide a faster native cadence. Never remove a manual cap.
++            beginTrial(State::NativeProbe, 0, mean);
++        }
++        return m_current;
++    }
++    const char* phase() const {
++        switch (m_state) {
++            case State::DownTrial: return "backoff-trial";
++            case State::UpTrial: return "recovery-trial";
++            case State::NativeProbe: return "native-probe";
++            case State::Steady: return m_current < m_requested ? "reduced" : "steady";
++        }
++        return "steady";
++    }
++private:
++    enum class State { Steady, DownTrial, UpTrial, NativeProbe };
++    State m_state{State::Steady};
++    bool m_initialized{false}, m_enabled{false};
++    unsigned m_requested{0}, m_cap{0}, m_current{0}, m_committed{0};
++    unsigned m_samples{0}, m_slowWindows{0}, m_skip{0};
++    double m_clock{0}, m_windowMs{0}, m_referenceMs{0}, m_latestMs{0};
++    double m_beforeMs{0}, m_nextTry{0}, m_nextProbe{8000}, m_retryMs{4000};
++    double m_failedDownMs{0};
++    unsigned m_worseWindows{0};
++    double m_nextDownTry{0};
++    void clearWindow() { m_windowMs = 0; m_samples = 0; }
++    void beginTrial(State state, unsigned count, double before) {
++        m_state = state; m_current = count; m_beforeMs = before;
++        m_slowWindows = 0; m_skip = 3; clearWindow();
++    }
++    void rejectTrial() {
++        // A cap the game cannot reach is not evidence that generation hurts.
++        // Retry a failed capped backoff only after materially worse cadence.
++        if (m_cap && m_state == State::DownTrial) {
++            m_failedDownMs = m_beforeMs;
++            m_worseWindows = 0;
++            m_nextDownTry = m_clock + 30000.0;
++        }
++        m_current = m_committed; m_state = State::Steady;
++        m_retryMs = std::min(16000.0, m_retryMs * 2.0);
++        m_nextTry = m_clock + m_retryMs; m_nextProbe = m_clock + m_retryMs;
++        m_slowWindows = 0; m_skip = 3; clearWindow();
++    }
++};
++}
+--- /dev/null
++++ b/lsfg-vk-layer/src/modes/recovery_predicate.hpp
+@@ -0,0 +1,27 @@
++#pragma once
++#include <cmath>
++
++namespace lsfgvk::layer {
++inline bool outputCadenceImproves(double previousMs,
++                                  unsigned previousGenerated,
++                                  double currentMs,
++                                  unsigned currentGenerated,
++                                  double requiredRatio)
++{
++    if (!std::isfinite(previousMs) || !std::isfinite(currentMs) ||
++        !std::isfinite(requiredRatio)) {
++        return false;
++    }
++    if (previousMs <= 0.0 || currentMs <= 0.0 || requiredRatio <= 0.0) {
++        return false;
++    }
++
++    const double previousTotal = static_cast<double>(previousGenerated) + 1.0;
++    const double currentTotal  = static_cast<double>(currentGenerated) + 1.0;
++
++    const double previousRate = previousTotal / previousMs;
++    const double currentRate  = currentTotal / currentMs;
++
++    return currentRate >= requiredRatio * previousRate;
++}
++}
+--- a/lsfg-vk-layer/src/modes/vsync.cpp
++++ b/lsfg-vk-layer/src/modes/vsync.cpp
+@@ -2,18 +2,137 @@
+ 
+ #include "vsync.hpp"
+ #include "../hooks.hpp"
++#include "../queue_guard.hpp"
++#include "present_schedule.hpp"
+ 
+ #include "lsfg-vk-helper/vkhelper.hpp"
+ 
++#include <atomic>
++#include <chrono>
++#include <cinttypes>
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
+ #include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
++#include <filesystem>
++#include <system_error>
++#include <thread>
+ #include <vector>
+ #include <vk>
+ 
+ using namespace lsfgvk::layer;
+ 
+ namespace {
++    using PacingClock = std::chrono::steady_clock;
++
++    int64_t pacingNowNs();
++
++    VkResult guardedPresent(PFN_vkQueuePresentKHR present, VkQueue queue,
++                            const VkPresentInfoKHR* info, int64_t* start = nullptr) {
++        const auto queueMutex = queueHostMutex(static_cast<VkQueue>(queue));
++        const std::lock_guard queueLock(*queueMutex);
++        if (start) *start = pacingNowNs();
++        return present(queue, info);
++    }
++
++    int64_t pacingNowNs() {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(
++            PacingClock::now().time_since_epoch()
++        ).count();
++    }
++
++    void pacingSleepUntil(int64_t deadline) {
++        std::this_thread::sleep_until(
++            std::chrono::time_point<PacingClock, std::chrono::nanoseconds>{
++                std::chrono::nanoseconds{deadline}
++            }
++        );
++    }
++
++    struct SmoothBatch {
++        ContextWrapper* context;
++        PFN_vkQueuePresentKHR present;
++        VkQueue queue;
++        VkSwapchainKHR swapchain;
++        PresentSchedule schedule;
++        uint64_t budgetNs;
++        unsigned outputs;
++        bool log;
++
++        int presentImage(uint32_t index, VkSemaphore semaphore, VkFence readyFence,
++                         unsigned ordinal) {
++            VkResult ready = VK_SUCCESS;
++            if (readyFence != VK_NULL_HANDLE) {
++                ready = context->waitGeneratedReady(budgetNs, readyFence);
++                if (ready == VK_TIMEOUT || ready == VK_NOT_READY)
++                    schedule.missingReadiness();
++                else if (ready != VK_SUCCESS) return ready;
++            }
++            pacingSleepUntil(schedule.deadline(pacingNowNs()));
++            const VkPresentInfoKHR info{
++                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++                .waitSemaphoreCount = 1, .pWaitSemaphores = &semaphore,
++                .swapchainCount = 1, .pSwapchains = &swapchain,
++                .pImageIndices = &index
++            };
++            const auto previous = schedule.lastNs();
++            int64_t actual = 0;
++            const auto result = guardedPresent(present, queue, &info, &actual);
++            schedule.record(actual);
++            if (log) std::fprintf(stderr,
++                "[lsfgvk-smooth-frame] outputs=%u ordinal=%u submit_ns=%" PRId64
++                " gap_ms=%.3f ready=%d result=%d\n", outputs, ordinal, actual,
++                (actual - previous) / 1e6, static_cast<int>(ready), static_cast<int>(result));
++            return result == VK_SUBOPTIMAL_KHR ? VK_SUCCESS : result;
++        }
++    };
++
++    VkResult enqueueSmoothed(DeferredPresent& worker, const std::shared_ptr<SmoothBatch>& batch,
++                            uint32_t index, VkSemaphore semaphore, VkFence readyFence,
++                            unsigned ordinal) {
++        const auto job = [batch, index, semaphore, readyFence, ordinal]() {
++            return batch->presentImage(index, semaphore, readyFence, ordinal);
++        };
++        if (worker.append(job)) return VK_SUCCESS;
++        // Allocation/thread failure must preserve order and not lose a present.
++        const auto drained = worker.drain();
++        if (drained != VK_SUCCESS) return static_cast<VkResult>(drained);
++        return static_cast<VkResult>(job());
++    }
++
++    std::optional<PairPacer> pacingFromEnvironment() {
++        const char* value{std::getenv("LSFGVK_PACE_FPS")};
++        if (!value || !*value) {
++            return std::nullopt;
++        }
++        int64_t fps{0};
++        for (const char* p{value}; *p; ++p) {
++            if (*p < '0' || *p > '9') {
++                return std::nullopt;
++            }
++            fps = fps * 10 + (*p - '0');
++            if (fps > 144) {
++                return std::nullopt;
++            }
++        }
++        if (fps == 0) {
++            return std::nullopt;
++        }
++        return PairPacer{500000000 / fps};
++    }
++
++    // ---- bounded diagnostic capture (opt-in via LSFGVK_CAPTURE_DIR only) ----
++    inline bool diagEnabled() {
++        static const bool enabled{std::getenv("LSFGVK_CAPTURE_DIR") != nullptr};
++        return enabled;
++    }
++
++    // Global (process-wide) bounded counters, shared across all queues/swapchains
++    std::atomic<unsigned> diagPresents{0};
++    std::atomic<unsigned> diagCreates{0};
++
+     /// Modify swapchain create info
+     VkSwapchainCreateInfoKHR modifySwapchainCreateInfo(
+         VkSwapchainCreateInfoKHR info,
+@@ -68,7 +187,24 @@
+         ),
+         alloc,
+         swapchain
+-) {
++    ) {
++    this->m_pairPacer = pacingFromEnvironment();
++
++    // Diagnostic: log the ORIGINAL create info (pre-modification values)
++    if (diagEnabled()) {
++        const unsigned id{diagCreates.fetch_add(1, std::memory_order_relaxed) + 1};
++        if (id <= 8) {
++            std::fprintf(stderr,
++                "[lsfgvk-diag] swapchain create #%u: minImageCount=%u "
++                "imageFormat=%d colorSpace=%d extent=%ux%u presentMode=%d "
++                "oldSwapchain=%p\n",
++                id, info.minImageCount, (int)info.imageFormat,
++                (int)info.imageColorSpace, info.imageExtent.width,
++                info.imageExtent.height, (int)info.presentMode,
++                (void*)info.oldSwapchain);
++        }
++    }
++
+     this->m_syncPasses.resize(this->m_swapchainImages.size());
+     for (auto& syncPass : this->m_syncPasses) {
+         syncPass.copyCmdbuf = vkhelper::createCommandBuffer(
+@@ -133,20 +269,88 @@
+     }
+ }
+ 
++VsyncSwapchain::~VsyncSwapchain() {
++    this->drainPending(); // Before sync passes and the context are destroyed.
++}
++
++VkResult VsyncSwapchain::drainPending() {
++    return static_cast<VkResult>(this->m_deferredOriginal.drain());
++}
++
+ VkResult VsyncSwapchain::QueuePresentKHR(
+     PFN_vkQueuePresentKHR fetchFunc,
+     VkQueue queue,
+     const VkPresentInfoKHR* presentInfo
+ ) {
++    if (this->m_pacingFailure != VK_SUCCESS) {
++        if (presentInfo->pResults) {
++            presentInfo->pResults[0] = this->m_pacingFailure;
++        }
++        return this->m_pacingFailure;
++    }
++
++    try {
++    const int64_t entryNs{pacingNowNs()};
++    const auto deferredResult = this->drainPending();
++    if (deferredResult != VK_SUCCESS) {
++        if (presentInfo->pResults) presentInfo->pResults[0] = deferredResult;
++        return deferredResult;
++    }
+     const auto status{Swapchain::QueuePresentKHR(fetchFunc, queue, presentInfo)};
++    if (status == VK_ERROR_OUT_OF_DATE_KHR && this->m_pairPacer) {
++        this->m_pairPacer->reset();
++    }
++    if (this->m_pairPacer &&
++        (!this->m_lsfgvkContext || this->m_layer.get().profile().multiplier != 2)) {
++        this->m_pairPacer->reset();
++    }
++    const unsigned presentId{diagPresents.fetch_add(1, std::memory_order_relaxed) + 1};
++    const bool diagThis{diagEnabled() && presentId <= 16};
++    if (diagThis) {
++        std::fprintf(stderr,
++            "[lsfgvk-diag] QueuePresent #%u: base status=%d (%s) imgIdx=%u\n",
++            presentId, (int)status, status == VK_ERROR_OUT_OF_DATE_KHR
++                ? "OUT_OF_DATE-after-reload-or-direct" : "other",
++            *presentInfo->pImageIndices);
++        for (auto* n{static_cast<const VkBaseInStructure*>(presentInfo->pNext)};
++                n; n = n->pNext) {
++            if (n->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT) {
++                const auto* pm{
++                    reinterpret_cast<const VkSwapchainPresentModeInfoEXT*>(n)};
++                std::fprintf(stderr,
++                    "[lsfgvk-diag]   pNext PresentModeInfoEXT count=%u modes:",
++                    pm->swapchainCount);
++                for (uint32_t k{0}; k < pm->swapchainCount && k < 4; k++)
++                    std::fprintf(stderr, " %d", (int)pm->pPresentModes[k]);
++                std::fprintf(stderr, "\n");
++            } else {
++                std::fprintf(stderr, "[lsfgvk-diag]   pNext sType=%d\n",
++                    (int)n->sType);
++            }
++        }
++    }
+     if (!this->m_lsfgvkContext) {
+-        return fetchFunc(queue, presentInfo);
++        this->m_recovery.reset();
++        this->m_previousEntryNs = 0;
++        return guardedPresent(fetchFunc, queue, presentInfo);
+     }
+ 
+     const auto& layerHook{this->m_layer.get()};
+     const auto& deviceHook{this->m_device.get()};
+ 
+     const auto& profile{layerHook.profile()};
++
++    const bool pacing{this->m_pairPacer.has_value() && profile.multiplier == 2};
++    bool timingThis{false};
++    if (pacing && this->m_pacingTimingCount < 600) {
++        const char* trigger{std::getenv("LSFGVK_TIMING_TRIGGER")};
++        if (trigger && *trigger) {
++            std::error_code error;
++            timingThis = std::filesystem::exists(trigger, error) && !error;
++        }
++    }
++    int64_t readyNs{0};
++    int64_t actualGenStart{0};
+ 
+     if (status == VK_ERROR_OUT_OF_DATE_KHR) {
+         this->resizeInnerSyncPasses(profile.multiplier - 1);
+@@ -172,8 +376,53 @@
+         }
+     }
+ 
+-    // Dispatch frame generation
+-    const uint32_t imagesToInsert{profile.multiplier - 1};
++    // A zero-work decision must precede consuming the application's semaphores.
++    if (status == VK_ERROR_OUT_OF_DATE_KHR) {
++        this->m_recovery.reset();
++        this->m_outputSmoother.reset();
++        this->m_previousEntryNs = 0;
++    }
++    const double elapsedMs = this->m_previousEntryNs
++        ? static_cast<double>(entryNs - this->m_previousEntryNs) / 1e6 : 0.0;
++    this->m_previousEntryNs = entryNs;
++    if (elapsedMs > 250.0) this->m_lsfgvkContext->invalidateHistory();
++    const uint32_t imagesToInsert{this->m_recovery.update(
++        elapsedMs, profile.multiplier - 1, profile.recoveryBaseFps,
++        profile.adaptiveRecovery && !pacing)};
++    if (imagesToInsert != this->m_effectiveGenerated) {
++        if (profile.adaptiveRecovery) std::fprintf(stderr,
++            "[lsfgvk-recovery] generated=%u requested=%u phase=%s base_cap=%u\n",
++            imagesToInsert, profile.multiplier - 1, this->m_recovery.phase(),
++            profile.recoveryBaseFps);
++        this->m_effectiveGenerated = imagesToInsert;
++    }
++    // Pace the actual output count, including levels selected by recovery.
++    const double smoothGapMs = this->m_outputSmoother.update(elapsedMs,
++        profile.adaptiveRecovery && !pacing && profile.multiplier >= 2 && profile.multiplier <= 4,
++        profile.recoveryBaseFps, imagesToInsert > 0,
++        imagesToInsert ? imagesToInsert + 1 : this->m_outputSmoother.outputCount());
++    if (profile.adaptiveRecovery && (smoothGapMs != this->m_lastSmoothGap ||
++        std::strcmp(this->m_lastSmoothPhase, this->m_outputSmoother.phase()) != 0)) {
++        std::fprintf(stderr, "[lsfgvk-smooth] phase=%s target_gap_ms=%.3f\n",
++            this->m_outputSmoother.phase(), smoothGapMs);
++    }
++    this->m_lastSmoothGap = smoothGapMs;
++    this->m_lastSmoothPhase = this->m_outputSmoother.phase();
++    bool smoothThisFrame{false};
++    std::shared_ptr<SmoothBatch> smoothBatch;
++    const auto smoothBudgetNs = static_cast<uint64_t>(
++        std::clamp(this->m_outputSmoother.sourcePeriodMs(), 8.0, 50.0) * 1e6);
++    if (imagesToInsert == 0) {
++        this->m_lsfgvkContext->invalidateHistory();
++        const auto nativeResult = guardedPresent(fetchFunc, queue, presentInfo);
++        if (nativeResult != VK_SUCCESS && nativeResult != VK_SUBOPTIMAL_KHR) {
++            this->m_recovery.reset();
++            this->m_previousEntryNs = 0;
++        }
++        return nativeResult;
++    }
++
++    // Dispatch only the work selected for this interval.
+ 
+     this->m_lsfgvkContext->dispatch(
+         *syncPass.copyCmdbuf,
+@@ -188,13 +437,31 @@
+         const auto& innerSyncPass{syncPass.innerSyncPasses.at(i)};
+ 
+         // Acquire swapchain image
+-        const auto acquireResult{deviceHook.device().acquireNextImageKHR(
+-           this->m_swapchain,
+-           UINT64_MAX,
+-           *innerSyncPass.acquireSemaphore,
+-           nullptr,
+-           deviceHook.dld()
+-        )};
++        const auto acquireResult{[&]() -> vk::ResultValue<uint32_t> {
++            try {
++                return deviceHook.device().acquireNextImageKHR(
++                   this->m_swapchain,
++                   UINT64_MAX,
++                   *innerSyncPass.acquireSemaphore,
++                   nullptr,
++                   deviceHook.dld()
++                );
++            } catch (const vk::SystemError& e) {
++                if (diagThis) {
++                    std::fprintf(stderr,
++                        "[lsfgvk-diag]   inner acquire[%zu] THREW %s (%d)\n",
++                        i, e.what(), (int)e.code().value());
++                }
++                throw; // preserve original behavior/paths
++            }
++        }()};
++        if (diagThis) {
++            std::fprintf(stderr,
++                "[lsfgvk-diag]   inner acquire[%zu] result=%d idx=%u%s\n",
++                i, (int)acquireResult.result, acquireResult.value,
++                acquireResult.result == vk::Result::eSuboptimalKHR
++                    ? " (SUBOPTIMAL)" : "");
++        }
+ 
+         // Copy generated frame into swapchain image
+         const auto& swapchainImage{this->m_swapchainImages.at(acquireResult.value)};
+@@ -211,6 +478,60 @@
+             { *innerSyncPass.acquireSemaphore },
+             signalSemaphores
+         );
++
++        if (smoothGapMs > 0.0 && i == 0) {
++            // The fence includes the application's unfinished rendering as well
++            // as LSFG work. Allow one measured source period, not a fixed 4 ms.
++            const auto budgetNs = smoothBudgetNs;
++            const auto ready = this->m_lsfgvkContext->waitGeneratedReady(budgetNs);
++            smoothThisFrame = ready == VK_SUCCESS;
++            ++this->m_smoothSamples;
++            this->m_smoothReady += smoothThisFrame;
++            if (this->m_smoothSamples % 120 == 0) std::fprintf(stderr,
++                "[lsfgvk-smooth-runtime] outputs=%u first_ready=%u/%u wait_budget_ms=%.3f\n",
++                imagesToInsert + 1, this->m_smoothReady, this->m_smoothSamples, budgetNs / 1e6);
++            if (ready != VK_SUCCESS && ready != VK_TIMEOUT && ready != VK_NOT_READY) {
++                this->m_pacingFailure = ready;
++                if (presentInfo->pResults) presentInfo->pResults[0] = ready;
++                return ready;
++            }
++        }
++
++        if (smoothBatch && i > 0) {
++            const auto result = enqueueSmoothed(this->m_deferredOriginal, smoothBatch,
++                acquireResult.value, static_cast<VkSemaphore>(*innerSyncPass.copySemaphore),
++                this->m_lsfgvkContext->generatedReadyFence(), static_cast<unsigned>(i));
++            if (result != VK_SUCCESS) {
++                if (presentInfo->pResults) presentInfo->pResults[0] = result;
++                return result;
++            }
++            continue;
++        }
++
++        if (pacing) {
++            // At 2x this is the only acquire, and it has now completed.
++            const VkResult waitResult{this->m_lsfgvkContext->waitGeneratedReady()};
++            if (waitResult != VK_SUCCESS) {
++                this->m_pairPacer->reset();
++                this->m_pacingFailure = waitResult == VK_TIMEOUT
++                    ? VK_ERROR_DEVICE_LOST : waitResult;
++                if (waitResult == VK_TIMEOUT) {
++                    std::fprintf(stderr,
++                        "[lsfgvk-pace] waittimeout after 1000000000 ns; "
++                        "returning fatal VK_ERROR_DEVICE_LOST\n");
++                } else {
++                    std::fprintf(stderr,
++                        "[lsfgvk-pace] waitGeneratedReady failed: %d; fatal\n",
++                        static_cast<int>(waitResult));
++                }
++                if (presentInfo->pResults) {
++                    presentInfo->pResults[0] = this->m_pacingFailure;
++                }
++                return this->m_pacingFailure;
++            }
++            readyNs = pacingNowNs();
++            pacingSleepUntil(this->m_pairPacer->generatedDeadline(readyNs));
++        }
+ 
+         // Present swapchain image
+         VkSemaphore copySemaphore2{*innerSyncPass.copySemaphore}; // NOLINT (32-bit const)
+@@ -223,9 +544,29 @@
+             .pSwapchains = presentInfo->pSwapchains,
+             .pImageIndices = &acquireResult.value
+         };
+-        const auto result{fetchFunc(queue, &presentInfo2)};
++        const auto result{guardedPresent(fetchFunc, queue, &presentInfo2,
++            (pacing || smoothThisFrame) ? &actualGenStart : nullptr)};
++        if (diagThis) {
++            std::fprintf(stderr,
++                "[lsfgvk-diag]   generated present[%zu] result=%d\n",
++                i, (int)result);
++        }
+         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++            if (diagThis) {
++                std::fprintf(stderr,
++                    "[lsfgvk-diag]   generated present[%zu] throwing %d\n",
++                    i, (int)result);
++            }
+             throw vk::SystemError(result, vk::errorCategory());
++        }
++        if (smoothThisFrame && i == 0) {
++            smoothBatch = std::make_shared<SmoothBatch>(SmoothBatch{
++                .context = this->m_lsfgvkContext.get(), .present = fetchFunc,
++                .queue = queue, .swapchain = *presentInfo->pSwapchains,
++                .schedule = PresentSchedule(actualGenStart, static_cast<int64_t>(smoothGapMs * 1e6)),
++                .budgetNs = smoothBudgetNs, .outputs = imagesToInsert + 1,
++                .log = this->m_smoothSamples % 120 == 0
++            });
+         }
+     }
+ 
+@@ -237,12 +578,52 @@
+         .pWaitSemaphores = &presentSemaphore2,
+         .swapchainCount = 1,
+         .pSwapchains = presentInfo->pSwapchains,
+-        .pImageIndices = presentInfo->pImageIndices
++        .pImageIndices = presentInfo->pImageIndices,
++        .pResults = presentInfo->pResults
+     };
+-    const auto result{fetchFunc(queue, &presentInfo2)};
++    if (smoothBatch) {
++        const auto result = enqueueSmoothed(this->m_deferredOriginal, smoothBatch,
++            *presentInfo->pImageIndices, presentSemaphore2, VK_NULL_HANDLE, imagesToInsert);
++        if (presentInfo->pResults) presentInfo->pResults[0] = result;
++        return result;
++    }
++    if (pacing) {
++        pacingSleepUntil(this->m_pairPacer->originalDeadline(actualGenStart));
++    }
++    const int64_t actualOrigStart{pacing ? pacingNowNs() : 0};
++    const auto result{guardedPresent(fetchFunc, queue, &presentInfo2)};
++    const int64_t endNs{timingThis ? pacingNowNs() : 0};
++    if (pacing && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)) {
++        this->m_pairPacer->recordOriginal(actualOrigStart);
++    }
++    if (timingThis) {
++        ++this->m_pacingTimingCount;
++        std::fprintf(stderr,
++            "[lsfgvk-pace] entry_ns=%" PRId64 " ready_ns=%" PRId64
++            " gen_ns=%" PRId64 " orig_ns=%" PRId64 " end_ns=%" PRId64 "\n",
++            entryNs, readyNs, actualGenStart, actualOrigStart, endNs);
++    }
++    if (diagThis) {
++        std::fprintf(stderr,
++            "[lsfgvk-diag]   original present result=%d\n", (int)result);
++    }
+     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++        if (diagThis) {
++            std::fprintf(stderr,
++                "[lsfgvk-diag]   original present throwing %d\n",
++                (int)result);
++        }
+         throw vk::SystemError(result, vk::errorCategory());
+     }
+ 
+     return result;
++    } catch (...) {
++        this->m_recovery.reset();
++        this->m_previousEntryNs = 0;
++        if (this->m_lsfgvkContext) this->m_lsfgvkContext->invalidateHistory();
++        if (this->m_pairPacer) {
++            this->m_pairPacer->reset();
++        }
++        throw;
++    }
+ }
+--- a/lsfg-vk-layer/src/modes/vsync.hpp
++++ b/lsfg-vk-layer/src/modes/vsync.hpp
+@@ -3,8 +3,13 @@
+ #pragma once
+ 
+ #include "../hooks.hpp"
++#include "pair_pacer.hpp"
++#include "recovery_controller.hpp"
++#include "output_smoother.hpp"
++#include "deferred_present.hpp"
+ 
+ #include <cstddef>
++#include <optional>
+ #include <vector>
+ #include <vk>
+ 
+@@ -39,7 +44,12 @@
+             VkQueue queue,
+             const VkPresentInfoKHR* presentInfo
+         ) override;
++        ~VsyncSwapchain() override;
++        VkResult drainPending() override;
+     private:
++        DeferredPresent m_deferredOriginal;
++        unsigned m_smoothSamples{0};
++        unsigned m_smoothReady{0};
+         struct SyncPass {
+             vk::UniqueCommandBuffer copyCmdbuf;
+             vk::UniqueSemaphore presentSemaphore;
+@@ -51,6 +61,15 @@
+             std::vector<InnerSyncPass> innerSyncPasses;
+         };
+         std::vector<SyncPass> m_syncPasses;
++        RecoveryController m_recovery;
++        OutputSmoother m_outputSmoother;
++        double m_lastSmoothGap{-1};
++        const char* m_lastSmoothPhase{"off"};
++        int64_t m_previousEntryNs{0};
++        unsigned m_effectiveGenerated{0};
++        std::optional<PairPacer> m_pairPacer;
++        VkResult m_pacingFailure{VK_SUCCESS};
++        unsigned m_pacingTimingCount{0};
+ 
+         void resizeInnerSyncPasses(size_t minSize);
+     };
+--- /dev/null
++++ b/lsfg-vk-layer/src/queue_guard.hpp
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: CC-BY-NC-ND-4.0 */
++#pragma once
++#include <map>
++#include <memory>
++#include <mutex>
++#include <vector>
++#include <vulkan/vulkan.h>
++namespace lsfgvk::layer {
++struct QueueHostEntry {
++    const void* deviceKey;
++    std::shared_ptr<std::mutex> mutex;
++};
++inline std::mutex queueRegistryMutex;
++inline std::map<VkQueue, QueueHostEntry> queueRegistry;
++inline const void* dispatchKey(const void* handle) {
++    return *static_cast<void* const*>(handle);
++}
++inline std::shared_ptr<std::mutex> queueHostMutex(VkQueue queue) {
++    const std::lock_guard registryLock(queueRegistryMutex);
++    const auto it = queueRegistry.find(queue);
++    if (it != queueRegistry.end()) return it->second.mutex;
++    QueueHostEntry entry{dispatchKey(queue), std::make_shared<std::mutex>()};
++    return queueRegistry.emplace(queue, std::move(entry)).first->second.mutex;
++}
++inline std::vector<std::shared_ptr<std::mutex>> deviceQueueMutexes(VkDevice device) {
++    const std::lock_guard registryLock(queueRegistryMutex);
++    std::vector<std::shared_ptr<std::mutex>> result;
++    for (const auto& [queue, entry] : queueRegistry) {
++        (void)queue;
++        if (entry.deviceKey == dispatchKey(device)) result.push_back(entry.mutex);
++    }
++    return result;
++}
++inline void forgetDeviceQueues(VkDevice device) {
++    const std::lock_guard registryLock(queueRegistryMutex);
++    std::erase_if(queueRegistry, [device](const auto& pair) {
++        return pair.second.deviceKey == dispatchKey(device);
++    });
++}
++}
+--- a/lsfg-vk-layer/src/wrapper.cpp
++++ b/lsfg-vk-layer/src/wrapper.cpp
+@@ -1,14 +1,25 @@
+ /* SPDX-License-Identifier: CC-BY-NC-ND-4.0 */
+ 
+ #include "wrapper.hpp"
++#include "queue_guard.hpp"
+ 
+ #include "logger.hpp"
+ #include "lsfg-vk-helper/vkhelper.hpp"
+ #include "lsfg-vk-utils/config.hpp"
+ #include "lsfg-vk/lsfgvk.hpp"
+ 
++#include <atomic>
++#include <cstddef>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstdint>
++#include <exception>
+ #include <filesystem>
++#include <fstream>
++#include <limits>
++#include <mutex>
++#include <stdexcept>
++#include <system_error>
+ #include <iomanip>
+ #include <ios>
+ #include <iostream>
+@@ -25,6 +36,245 @@
+ using namespace lsfgvk::layer;
+ 
+ namespace {
++    // PRIVATE diagnostic, not a fix. Assumes both images are RGBA8_UNORM SDR
++    // at m_extent, and the dispatch image remains available to this queue.
++    // Copies, capture serialization and the CPU fence wait perturb timing and
++    // may mask races. No normal image usages or semaphore behavior are changed.
++    std::mutex captureMutex;
++    std::atomic_bool captureDisabled{false};
++    uint32_t captureCount{0}; // Under captureMutex; count only consumed triggers.
++    struct RetainedCapture {
++        VkDevice device{};
++        VkBuffer buffer{};
++        VkDeviceMemory memory{};
++    };
++    RetainedCapture retainedCaptures[8]{}; // Never explicitly destroyed.
++
++    struct PrivateCapture {
++        const vk::detail::DispatchLoaderDynamic& dld;
++        VkDevice device;
++        std::unique_lock<std::mutex> lock;
++        VkBuffer buffer{};
++        VkDeviceMemory memory{};
++        VkDeviceSize imageBytes{};
++        vk::Extent2D extent{};
++        std::filesystem::path directory;
++        uint32_t id{};
++        bool recorded{false};
++        bool completed{false};
++        void* mapped{};
++        const char* stage{"prepare"};
++        VkResult lastResult{VK_SUCCESS};
++
++        PrivateCapture(const vk::detail::DispatchLoaderDynamic& loader, VkDevice dev)
++            : dld(loader), device(dev), lock(captureMutex, std::defer_lock) {}
++        PrivateCapture(const PrivateCapture&) = delete;
++        PrivateCapture& operator=(const PrivateCapture&) = delete;
++
++        void report(const char* message) const noexcept {
++            if (!id) return; // Only consumed triggers: at most eight attempts.
++            // C stdio avoids throwing C++ streams/formatting in noexcept paths.
++            std::fprintf(stderr,
++                "[lsfgvk capture] pair=%u extent=%ux%u stage=%s lastVkResult=%d: %s\n",
++                static_cast<unsigned>(id), static_cast<unsigned>(extent.width),
++                static_cast<unsigned>(extent.height), stage,
++                static_cast<int>(lastResult), message);
++            std::fflush(stderr);
++        }
++
++        void check(VkResult result, const char* operation) {
++            stage = operation;
++            lastResult = result;
++            if (result != VK_SUCCESS)
++                throw std::runtime_error(operation);
++        }
++
++        void release() noexcept {
++            if (mapped) dld.vkUnmapMemory(device, memory);
++            if (buffer) dld.vkDestroyBuffer(device, buffer, nullptr);
++            if (memory) dld.vkFreeMemory(device, memory, nullptr);
++            mapped = nullptr;
++            buffer = VK_NULL_HANDLE;
++            memory = VK_NULL_HANDLE;
++        }
++
++        ~PrivateCapture() noexcept {
++            if (recorded && !completed) {
++                // Also covers end/submit exceptions: completion is not proven.
++                // Keep raw resources even if the CB was never submitted.
++                captureDisabled.store(true);
++                report("completion unproven; retaining GPU resources; captures disabled");
++                retainedCaptures[id - 1] = {device, buffer, memory};
++            } else {
++                release();
++            }
++        }
++
++        void prepare(VkPhysicalDevice physdev, vk::Extent2D size) noexcept {
++            const char* env = std::getenv("LSFGVK_CAPTURE_DIR");
++            if (!env || !*env || captureDisabled.load()) return;
++            try {
++                lock.lock(); // Serialize claims, GPU completion and output globally.
++                if (captureDisabled.load() || captureCount == 8) return;
++                directory = env;
++                if (!std::filesystem::is_directory(directory))
++                    throw std::runtime_error("private capture directory missing");
++                const auto marker = directory / "lsfgvk_capture_trigger";
++                std::error_code ec;
++                const auto status = std::filesystem::symlink_status(marker, ec);
++                if (ec == std::errc::no_such_file_or_directory) return;
++                if (ec) throw std::runtime_error("private capture marker status failed");
++                if (!std::filesystem::exists(status)) return;
++                if (!std::filesystem::is_regular_file(status))
++                    throw std::runtime_error("private capture marker is not a file");
++                // Successful removal claims one attempt. Never create a directory
++                // or trigger, and never remove anything except this marker.
++                if (!std::filesystem::remove(marker)) return;
++                id = ++captureCount;
++                extent = size;
++                report("trigger consumed");
++                stage = "validate extent";
++                const uint64_t pixels = uint64_t(size.width) * size.height;
++                if (!pixels || pixels > std::numeric_limits<std::size_t>::max() / 8 ||
++                    pixels > std::numeric_limits<VkDeviceSize>::max() / 8)
++                    throw std::runtime_error("private capture extent overflow");
++                imageBytes = pixels * 4;
++                VkBufferCreateInfo info{};
++                info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
++                info.size = imageBytes * 2;
++                info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++                info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++                check(dld.vkCreateBuffer(device, &info, nullptr, &buffer), "vkCreateBuffer");
++                stage = "select coherent memory type";
++                VkMemoryRequirements requirements{};
++                dld.vkGetBufferMemoryRequirements(device, buffer, &requirements);
++                VkPhysicalDeviceMemoryProperties properties{};
++                dld.vkGetPhysicalDeviceMemoryProperties(physdev, &properties);
++                const VkMemoryPropertyFlags wanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++                uint32_t type = 0;
++                for (; type < properties.memoryTypeCount; ++type) {
++                    if ((requirements.memoryTypeBits & (uint32_t{1} << type)) &&
++                        (properties.memoryTypes[type].propertyFlags & wanted) == wanted)
++                        break;
++                }
++                if (type == properties.memoryTypeCount)
++                    throw std::runtime_error("private capture coherent memory unavailable");
++                VkMemoryAllocateInfo allocation{};
++                allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++                allocation.allocationSize = requirements.size;
++                allocation.memoryTypeIndex = type;
++                check(dld.vkAllocateMemory(device, &allocation, nullptr, &memory),
++                    "vkAllocateMemory");
++                check(dld.vkBindBufferMemory(device, buffer, memory, 0), "vkBindBufferMemory");
++                stage = "allocation complete";
++                report("buffer ready");
++            } catch (const std::exception& error) {
++                report(error.what());
++                captureDisabled.store(true);
++                release();
++            } catch (...) {
++                report("unknown exception");
++                captureDisabled.store(true);
++                release(); // No commands reference these allocations yet.
++            }
++        }
++
++        void record(VkCommandBuffer cb, VkImage original, VkImage generated) noexcept {
++            if (!buffer) return;
++            stage = "record/end/submit";
++            recorded = true; // Cleanup now requires confirmed GPU completion.
++            VkImageMemoryBarrier images[2]{};
++            for (auto& image : images) {
++                image.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++                image.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
++                image.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++                image.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
++                image.newLayout = VK_IMAGE_LAYOUT_GENERAL;
++                image.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++                image.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++                image.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++            }
++            images[0].image = original;
++            images[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++            images[1].image = generated;
++            dld.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, images);
++            VkBufferImageCopy region{};
++            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++            region.imageExtent = {extent.width, extent.height, 1};
++            dld.vkCmdCopyImageToBuffer(cb, original, VK_IMAGE_LAYOUT_GENERAL,
++                buffer, 1, &region);
++            region.bufferOffset = imageBytes;
++            dld.vkCmdCopyImageToBuffer(cb, generated, VK_IMAGE_LAYOUT_GENERAL,
++                buffer, 1, &region);
++            images[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++            images[0].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
++            images[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
++            images[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++            dld.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, images);
++            VkBufferMemoryBarrier host{};
++            host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
++            host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++            host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
++            host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            host.buffer = buffer;
++            host.size = imageBytes * 2;
++            dld.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &host, 0, nullptr);
++        }
++
++        void finish(VkFence fence, uint64_t iteration) noexcept {
++            if (!recorded) return;
++            stage = "vkWaitForFences";
++            const VkResult result = dld.vkWaitForFences(device, 1, &fence,
++                VK_TRUE, 1000000000ULL); // Finite wait; do not reset the fence.
++            lastResult = result;
++            if (result != VK_SUCCESS) {
++                report("fence timeout/error; captures disabled");
++                captureDisabled.store(true);
++                return; // Destructor retains resources until process exit.
++            }
++            completed = true;
++            try {
++                check(dld.vkMapMemory(device, memory, 0, imageBytes * 2, 0, &mapped),
++                    "vkMapMemory");
++                stage = "construct output filenames";
++                const auto* pixels = static_cast<const uint8_t*>(mapped);
++                const auto stem = "lsfgvk_pair" + std::to_string(id) + "_iteration" +
++                    std::to_string(iteration) + "_" + std::to_string(extent.width) +
++                    "x" + std::to_string(extent.height);
++                for (uint32_t image = 0; image < 2; ++image) {
++                    stage = image == 0 ? "original file path" : "generated file path";
++                    const auto path = directory / (stem +
++                        (image == 0 ? "_original.ppm" : "_generated.ppm"));
++                    std::ofstream output;
++                    output.exceptions(std::ios::failbit | std::ios::badbit);
++                    stage = image == 0 ? "original file open" : "generated file open";
++                    output.open(path, std::ios::binary | std::ios::out | std::ios::trunc);
++                    stage = image == 0 ? "original file write" : "generated file write";
++                    output << "P6\n" << extent.width << ' ' << extent.height << "\n255\n";
++                    const auto* rgba = pixels + image * imageBytes;
++                    for (VkDeviceSize offset = 0; offset < imageBytes; offset += 4)
++                        output.write(reinterpret_cast<const char*>(rgba + offset), 3);
++                    stage = image == 0 ? "original file close" : "generated file close";
++                    output.close(); // Check buffered writes and close errors too.
++                }
++                stage = "complete";
++                report("success: original and generated PPM files closed");
++            } catch (const std::exception& error) {
++                report(error.what());
++                captureDisabled.store(true);
++            } catch (...) {
++                report("unknown exception");
++                captureDisabled.store(true); // Diagnostic errors must not disable FG.
++            }
++            release(); // Read, unmap, destroy buffer, then free memory.
++        }
++    };
++
+     /// Identify the current Vulkan device
+     std::string identifyDevice(
+         const vk::detail::DispatchLoaderDynamic& dld,
+@@ -232,6 +482,10 @@
+         instance.m_dld,
+         instance.m_device
+     );
++    for (uint32_t i = 2; i < profile.multiplier; ++i) {
++        this->m_generatedFences.push_back(vkhelper::createFence(
++            instance.m_dld, instance.m_device));
++    }
+ }
+ 
+ void ContextWrapper::dispatch(
+@@ -245,17 +499,27 @@
+ 
+     // Wait for any previous frame to finish
+     if (this->m_iteration != 0) {
+-        const auto _{instance.m_device.waitForFences(
++        const auto completion{instance.m_device.waitForFences(
+             *this->m_completionFence,
+             vk::True,
+             1'000'000'000, // 1 second timeout
+             instance.m_dld
+         )};
++        if (completion != vk::Result::eSuccess)
++            throw vk::SystemError(static_cast<int>(completion), vk::errorCategory());
+         instance.m_device.resetFences(
+             *this->m_completionFence,
+             instance.m_dld
+         );
+-    }
++        for (const auto& fence : this->m_generatedFences)
++            instance.m_device.resetFences(*fence, instance.m_dld);
++    }
++
++    this->m_generatedCopies = 0;
++    this->m_lastGeneratedFence = VK_NULL_HANDLE;
++
++    // Wait above still refers to the last submitted batch, even after native bypass.
++    if (this->m_historyInvalid) this->m_iteration = 0;
+ 
+     // Copy swapchain image into lsfg-vk context
+     cmdbuf.begin(
+@@ -283,7 +547,7 @@
+                 vk::AccessFlagBits::eTransferWrite,
+                 vk::ImageLayout::eUndefined,
+                 vk::ImageLayout::eGeneral,
+-                this->m_iteration % 2, 1
++                this->m_iteration % 2, this->m_historyInvalid ? 2 : 1
+             ),
+         },
+         instance.m_dld
+@@ -296,6 +560,11 @@
+         *this->m_sourceImage.first, this->m_iteration % 2,
+         this->m_extent
+     );
++    if (this->m_historyInvalid) {
++        // Both history slots start at the current image after a native interval.
++        vkhelper::blitImage(instance.m_dld, cmdbuf, swapchainImage, 0,
++            *this->m_sourceImage.first, 1, this->m_extent);
++    }
+ 
+     cmdbuf.pipelineBarrier(
+         vk::PipelineStageFlagBits::eTransfer,
+@@ -328,28 +597,48 @@
+         .signalSemaphoreValueCount = 1,
+         .pSignalSemaphoreValues = &nextSyncValue
+     };
+-    queue.submit(
+-        {{
+-            .pNext = &timelineInfo,
+-            .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
+-            .pWaitSemaphores = waitSemaphores.data(),
+-            .pWaitDstStageMask = waitStages.data(),
+-            .commandBufferCount = 1,
+-            .pCommandBuffers = &cmdbuf,
+-            .signalSemaphoreCount = 1,
+-            .pSignalSemaphores = signalSemaphores.data()
+-        }},
+-        nullptr,
+-        instance.m_dld
+-    );
++    {
++        const auto queueMutex = queueHostMutex(static_cast<VkQueue>(queue));
++        const std::lock_guard queueLock(*queueMutex);
++        queue.submit(
++            {{
++                .pNext = &timelineInfo,
++                .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
++                .pWaitSemaphores = waitSemaphores.data(),
++                .pWaitDstStageMask = waitStages.data(),
++                .commandBufferCount = 1,
++                .pCommandBuffers = &cmdbuf,
++                .signalSemaphoreCount = 1,
++                .pSignalSemaphores = signalSemaphores.data()
++            }},
++            nullptr,
++            instance.m_dld
++        );
++    }
++
++    this->m_captureOriginalImage = swapchainImage;
+ 
+     // Dispatch lsfg-vk context
+-    this->m_lsfgvkContext->dispatch(imagesToInsert);
++    this->m_lsfgvkContext->dispatch(imagesToInsert, false, this->m_historyInvalid);
++    this->m_historyInvalid = false;
+ 
+     // Update state
+     this->m_remainingImages = imagesToInsert;
+     this->m_syncSemaphore.second++;
+     this->m_iteration++;
++}
++
++VkResult lsfgvk::layer::ContextWrapper::waitGeneratedReady(uint64_t timeoutNs, VkFence fence) const {
++    const auto& instance{this->m_instance.get()};
++    if (fence == VK_NULL_HANDLE) fence = this->m_lastGeneratedFence;
++    // This fence belongs to the application game device, not the private pipeline.
++    return instance.m_dld.vkWaitForFences(
++        static_cast<VkDevice>(instance.m_device),
++        1,
++        &fence,
++        VK_TRUE,
++        timeoutNs
++    );
+ }
+ 
+ void ContextWrapper::acquire(
+@@ -361,6 +650,10 @@
+ ) {
+     const auto& instance{this->m_instance.get()};
+ 
++    PrivateCapture capture(instance.m_dld, static_cast<VkDevice>(instance.m_device));
++    if (this->m_remainingImages == 1)
++        capture.prepare(static_cast<VkPhysicalDevice>(instance.m_physdev), this->m_extent);
++
+     // Copy lsfg-vk context image into swapchain image
+     cmdbuf.begin(
+         {
+@@ -368,6 +661,11 @@
+         },
+         instance.m_dld
+     );
++
++    // Copy before the normal blit can overwrite an aliased original image.
++    capture.record(static_cast<VkCommandBuffer>(cmdbuf),
++        static_cast<VkImage>(this->m_captureOriginalImage),
++        static_cast<VkImage>(*this->m_destinationImage.first));
+ 
+     cmdbuf.pipelineBarrier(
+         vk::PipelineStageFlagBits::eTopOfPipe,
+@@ -426,34 +724,49 @@
+         vk::PipelineStageFlagBits::eTopOfPipe
+     };
+ 
+-    const uint64_t nextWaitSyncValue{this->m_syncSemaphore.second + 1};
+-    const uint64_t nextSignalSyncValue{this->m_syncSemaphore.second + 2};
++    std::vector<uint64_t> waitValues(waitSemaphores.size(), 0);
++    std::vector<uint64_t> signalValues(signalSemaphores.size(), 0);
++    waitValues[0] = this->m_syncSemaphore.second + 1;
++    if (this->m_remainingImages > 1) signalValues[0] = this->m_syncSemaphore.second + 2;
+ 
+     const vk::TimelineSemaphoreSubmitInfo timelineInfo = {
+         .waitSemaphoreValueCount = static_cast<uint32_t>(waitSemaphores.size()),
+-        .pWaitSemaphoreValues = &nextWaitSyncValue,
++        .pWaitSemaphoreValues = waitValues.data(),
+         .signalSemaphoreValueCount = this->m_remainingImages == 1 ? 0
+             : static_cast<uint32_t>(signalSemaphores.size()),
+-        .pSignalSemaphoreValues = &nextSignalSyncValue
++        .pSignalSemaphoreValues = signalValues.data()
+     };
+ 
+-    queue.submit(
+-        {{
+-            .pNext = &timelineInfo,
+-            .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
+-            .pWaitSemaphores = waitSemaphores.data(),
+-            .pWaitDstStageMask = waitStages.data(),
+-            .commandBufferCount = 1,
+-            .pCommandBuffers = &cmdbuf,
+-            .signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size()),
+-            .pSignalSemaphores = signalSemaphores.data()
+-        }},
+-        this->m_remainingImages == 1 ? *this->m_completionFence : nullptr,
+-        instance.m_dld
+-    );
++    // Every generated copy is independently observable; the final copy also
++    // protects whole-batch reuse on the next dispatch.
++    const vk::Fence readyFence = this->m_remainingImages == 1
++        ? *this->m_completionFence : *this->m_generatedFences.at(this->m_generatedCopies);
++    {
++        const auto queueMutex = queueHostMutex(static_cast<VkQueue>(queue));
++        const std::lock_guard queueLock(*queueMutex);
++        queue.submit(
++            {{
++                .pNext = &timelineInfo,
++                .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
++                .pWaitSemaphores = waitSemaphores.data(),
++                .pWaitDstStageMask = waitStages.data(),
++                .commandBufferCount = 1,
++                .pCommandBuffers = &cmdbuf,
++                .signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size()),
++                .pSignalSemaphores = signalSemaphores.data()
++            }},
++            readyFence,
++            instance.m_dld
++        );
++    }
++
++    this->m_lastGeneratedFence = static_cast<VkFence>(readyFence);
++    ++this->m_generatedCopies;
+ 
+     // Acquire next frame from lsfg-vk context
+     this->m_lsfgvkContext->acquire();
++
++    capture.finish(static_cast<VkFence>(*this->m_completionFence), this->m_iteration);
+ 
+     // Update state
+     this->m_remainingImages--;
+--- a/lsfg-vk-layer/src/wrapper.hpp
++++ b/lsfg-vk-layer/src/wrapper.hpp
+@@ -98,6 +98,14 @@
+             std::vector<vk::Semaphore> signalSemaphores
+         );
+ 
++        // Snapshot the fence for the most recently acquired generated copy.
++        // A deferred consumer must drain before dispatch resets these fences.
++        VkFence generatedReadyFence() const { return m_lastGeneratedFence; }
++        VkResult waitGeneratedReady(uint64_t timeoutNs = 1000000000,
++                                    VkFence fence = VK_NULL_HANDLE) const;
++        // Called before native bypass; no GPU work or synchronization is submitted.
++        void invalidateHistory() { m_historyInvalid = true; }
++
+         // Non-copyable, non-movable
+         ContextWrapper(const ContextWrapper&) = delete;
+         ContextWrapper& operator=(const ContextWrapper&) = delete;
+@@ -109,13 +117,18 @@
+ 
+         std::unique_ptr<lsfgvk::Context> m_lsfgvkContext;
+         uint64_t m_iteration{0};
++        bool m_historyInvalid{false};
+         uint32_t m_remainingImages{0};
+ 
+         std::pair<vk::UniqueSemaphore, uint64_t> m_syncSemaphore;
+         std::pair<vk::UniqueImage, vk::UniqueDeviceMemory> m_sourceImage;
+         std::pair<vk::UniqueImage, vk::UniqueDeviceMemory> m_destinationImage;
+         vk::UniqueFence m_completionFence;
++        std::vector<vk::UniqueFence> m_generatedFences;
++        uint32_t m_generatedCopies{0};
++        VkFence m_lastGeneratedFence{VK_NULL_HANDLE};
+         vk::Extent2D m_extent;
++        vk::Image m_captureOriginalImage; // Nonowning dispatch image.
+ 
+         ContextWrapper(
+             InstanceWrapper& instance,
+--- a/lsfg-vk-pipeline/include/lsfg-vk/lsfgvk.hpp
++++ b/lsfg-vk-pipeline/include/lsfg-vk/lsfgvk.hpp
+@@ -144,7 +144,7 @@
+         /// @param unsignaled Do not wait for any timeline semaphores
+         /// @throws std::runtime_error on failure
+         ///
+-        void dispatch(uint32_t total, bool unsignaled = false);
++        void dispatch(uint32_t total, bool unsignaled = false, bool resetHistory = false);
+ 
+         ///
+         /// Acquire a generated image
+--- a/lsfg-vk-pipeline/src/lsfgvk.cpp
++++ b/lsfg-vk-pipeline/src/lsfgvk.cpp
+@@ -168,7 +168,7 @@
+     };
+ }
+ 
+-void Context::dispatch(uint32_t total, bool unsignaled) {
++void Context::dispatch(uint32_t total, bool unsignaled, bool resetHistory) {
+     auto& ctx{*this->m_impl};
+     const auto& vk{ctx.instance.get().vk};
+ 
+@@ -184,7 +184,7 @@
+         vk.device->resetFences(*ctx.fence.first, *vk.dld);
+         ctx.fence.second = false;
+ 
+-        mapped->iteration++;
++        mapped->iteration = resetHistory ? 0 : mapped->iteration + 1;
+     }
+ 
+     // Dispatch pre-pass
+--- /dev/null
++++ b/tests/deferred_present_test.cpp
+@@ -0,0 +1,179 @@
++
++#include "../lsfg-vk-layer/src/modes/deferred_present.hpp"
++
++#include <atomic>
++#include <cassert>
++#include <chrono>
++#include <cstdio>
++#include <functional>
++#include <future>
++#include <memory>
++#include <stdexcept>
++#include <thread>
++
++using lsfgvk::layer::DeferredPresent;
++using namespace std::chrono_literals;
++
++namespace {
++
++template <class Pred>
++bool wait_until(Pred pred, int spins = 4'000'000) {
++    for (int i = 0; i < spins; ++i) {
++        if (pred()) return true;
++        std::this_thread::yield();
++    }
++    return pred();
++}
++
++// submit returns before a blocked callback finishes.
++void test_submit_returns_before_blocked_callback_finishes() {
++    DeferredPresent dp;
++
++    std::atomic<bool> started{false};
++    std::atomic<bool> finished{false};
++    std::promise<void> gate;
++    auto gate_fut = gate.get_future().share();
++
++    auto sub = std::async(std::launch::async, [&] {
++        return dp.submit([&]() -> int {
++            started.store(true);
++            gate_fut.wait();
++            finished.store(true);
++            return 0;
++        });
++    });
++
++    assert(wait_until([&] { return started.load(); }));
++    assert(sub.wait_for(50ms) == std::future_status::ready);
++    assert(sub.get() == true);
++    assert(!finished.load());
++
++    gate.set_value();
++    assert(dp.drain() == 0);
++    assert(finished.load());
++}
++
++// submit rejects an overlapping submission while one is pending.
++void test_submit_rejects_overlapping() {
++    DeferredPresent dp;
++
++    std::atomic<bool> started{false};
++    std::promise<void> gate;
++    auto gate_fut = gate.get_future().share();
++
++    assert(dp.submit([&]() -> int {
++        started.store(true);
++        gate_fut.wait();
++        return 0;
++    }));
++    assert(wait_until([&] { return started.load(); }));
++
++    assert(dp.submit([] { return 0; }) == false);
++
++    gate.set_value();
++    assert(dp.drain() == 0);
++}
++
++// drain blocks until the pending callback completes.
++void test_drain_waits_for_completion() {
++    DeferredPresent dp;
++
++    std::atomic<bool> started{false};
++    std::atomic<bool> finished{false};
++    std::promise<void> gate;
++    auto gate_fut = gate.get_future().share();
++
++    assert(dp.submit([&]() -> int {
++        started.store(true);
++        gate_fut.wait();
++        finished.store(true);
++        return 0;
++    }));
++    assert(wait_until([&] { return started.load(); }));
++
++    auto drained = std::async(std::launch::async, [&] { return dp.drain(); });
++    assert(drained.wait_for(50ms) == std::future_status::timeout);
++    assert(!finished.load());
++
++    gate.set_value();
++    assert(drained.get() == 0);
++    assert(finished.load());
++}
++
++// The object is reusable after a successful drain.
++void test_reuse_after_success() {
++    DeferredPresent dp;
++
++    assert(dp.submit([] { return 0; }));
++    assert(dp.drain() == 0);
++
++    assert(dp.submit([] { return 0; }));
++    assert(dp.drain() == 0);
++
++    assert(dp.submit([] { return 0; }));
++    assert(dp.drain() == 0);
++}
++
++// A nonzero callback error is latched and sticky.
++void test_sticky_error_latched() {
++    DeferredPresent dp;
++
++    assert(dp.submit([] { return -4; }));
++    assert(dp.drain() == -4);
++    assert(dp.drain() == -4);
++
++    assert(dp.submit([] { return 0; }) == false);
++    assert(dp.drain() == -4);
++}
++
++// A thrown callback becomes -1 and is latched.
++void test_thrown_callback_yields_minus_one() {
++    DeferredPresent dp;
++
++    assert(dp.submit([]() -> int { throw std::runtime_error("boom"); }));
++    assert(dp.drain() == -1);
++    assert(dp.drain() == -1);
++
++    assert(dp.submit([] { return 0; }) == false);
++}
++
++// Destruction waits for an in-flight callback to complete.
++void test_destruction_waits_for_callback() {
++    auto dp = std::make_unique<DeferredPresent>();
++
++    std::atomic<bool> finished{false};
++    std::promise<void> started;
++    auto started_fut = started.get_future();
++    std::promise<void> gate;
++    auto gate_fut = gate.get_future().share();
++
++    assert(dp->submit([&]() -> int {
++        started.set_value();
++        gate_fut.wait();
++        finished.store(true);
++        return 0;
++    }));
++    started_fut.wait();
++
++    auto destroyer = std::async(std::launch::async, [&] { dp.reset(); });
++    assert(destroyer.wait_for(50ms) == std::future_status::timeout);
++    assert(!finished.load());
++
++    gate.set_value();
++    destroyer.get();
++    assert(finished.load());
++}
++
++}  // namespace
++
++int main() {
++    test_submit_returns_before_blocked_callback_finishes();
++    test_submit_rejects_overlapping();
++    test_drain_waits_for_completion();
++    test_reuse_after_success();
++    test_sticky_error_latched();
++    test_thrown_callback_yields_minus_one();
++    test_destruction_waits_for_callback();
++    std::puts("all DeferredPresent tests passed");
++    return 0;
++}
+--- /dev/null
++++ b/tests/multiplier_pacing_test.cpp
+@@ -0,0 +1,38 @@
++#include "output_smoother.hpp"
++#include "deferred_present.hpp"
++#include <cassert>
++#include <chrono>
++#include <future>
++#include <vector>
++#include <cstdio>
++using namespace lsfgvk::layer;
++using namespace std::chrono_literals;
++template<class T> double update(T& p,unsigned outputs){
++ if constexpr(requires {p.update(1000.0/30,true,72,true,outputs);})
++  return p.update(1000.0/30,true,72,true,outputs);
++ else return p.update(1000.0/30,true,72,true);
++}
++template<class T> bool append(T& p,std::function<int()> job){
++ if constexpr(requires {p.append(job);})return p.append(job);
++ else return p.submit(job);
++}
++int main(int argc,char**){
++ if(argc==1){
++  OutputSmoother p;
++  for(unsigned n:{2,3,4,3,2,4}){
++   double gap=0;for(int i=0;i<120;++i)gap=update(p,n);
++   assert(std::abs(gap-1000.0/30/n)<0.05);
++  }
++  std::puts("PASS effective output count sets 2x/3x/4x spacing and recovery transitions");
++ }else{
++  DeferredPresent queue;std::promise<void> started,release;auto gate=release.get_future().share();std::vector<int> order;
++  assert(append(queue,[&]{started.set_value();gate.wait();order.push_back(1);return 0;}));
++  assert(started.get_future().wait_for(2s)==std::future_status::ready);
++  assert(append(queue,[&]{order.push_back(2);return 0;}));
++  assert(append(queue,[&]{order.push_back(3);return 0;}));
++  assert(!append(queue,[]{return 0;})); // At most three deferred presents at 4x.
++  release.set_value();assert(queue.drain()==0);assert((order==std::vector<int>{1,2,3}));
++  assert(append(queue,[]{return -4;}));assert(queue.drain()==-4);assert(!append(queue,[]{return 0;}));
++  std::puts("PASS bounded ordered 4x tail, nonblocking append, sticky errors and drain");
++ }
++}
+--- /dev/null
++++ b/tests/multiplier_present_regression.py
+@@ -0,0 +1,63 @@
++from pathlib import Path
++import subprocess
++root=Path(__file__).resolve().parents[1]
++s=(root/'lsfg-vk-layer/src/modes/vsync.cpp').read_text()
++production=s[s.index('    struct SmoothBatch {'):s.index('    std::optional<PairPacer> pacingFromEnvironment()')]
++fixture=r'''
++#include <vulkan/vulkan.h>
++#include "present_schedule.hpp"
++#include "deferred_present.hpp"
++#include <memory>
++#include <cinttypes>
++#include <cstdio>
++#include <cassert>
++#include <vector>
++using namespace lsfgvk::layer;
++int64_t now=0;
++int64_t pacingNowNs(){return now;}
++void pacingSleepUntil(int64_t deadline){assert(deadline>=now);now=deadline;}
++struct ContextWrapper {
++ VkResult result=VK_SUCCESS; int64_t readyAt=0; std::vector<VkFence> fences;
++ VkResult waitGeneratedReady(uint64_t budget,VkFence fence){assert(budget==33333333);fences.push_back(fence);now=std::max(now,readyAt);return result;}
++};
++std::vector<uint32_t> indices;
++VkResult nextPresent=VK_SUCCESS;
++VkResult guardedPresent(PFN_vkQueuePresentKHR,VkQueue,const VkPresentInfoKHR* info,int64_t* start){
++ assert(info->waitSemaphoreCount==1 && info->swapchainCount==1);
++ assert(info->pWaitSemaphores && info->pImageIndices && !info->pNext && !info->pResults);
++ indices.push_back(*info->pImageIndices);*start=now;return nextPresent;
++}
++''' + production + r'''
++int main(){
++ for(unsigned n:{2,3,4}){
++  now=0;indices.clear();ContextWrapper ctx;
++  const auto gap=33333333/n;
++  SmoothBatch batch{&ctx,nullptr,VK_NULL_HANDLE,VK_NULL_HANDLE,PresentSchedule(0,gap),33333333,n,false};
++  for(unsigned i=1;i<n;++i){
++   const auto fence=i==n-1?VK_NULL_HANDLE:reinterpret_cast<VkFence>(static_cast<uintptr_t>(i));
++   assert(batch.presentImage(i,VK_NULL_HANDLE,fence,i)==VK_SUCCESS);
++   assert(now==gap*i); assert(indices.back()==i);
++  }
++  assert(indices.size()==n-1 && ctx.fences.size()==n-2);
++ }
++ now=0;indices.clear();ContextWrapper ctx;ctx.readyAt=20000000;
++ SmoothBatch late{&ctx,nullptr,VK_NULL_HANDLE,VK_NULL_HANDLE,PresentSchedule(0,8333333),33333333,4,false};
++ auto fence=reinterpret_cast<VkFence>(uintptr_t{1});
++ assert(late.presentImage(1,VK_NULL_HANDLE,fence,1)==VK_SUCCESS && now==20000000);
++ assert(late.presentImage(2,VK_NULL_HANDLE,fence,2)==VK_SUCCESS && now==28333333);
++ ctx.result=VK_TIMEOUT;ctx.readyAt=50000000;
++ assert(late.presentImage(3,VK_NULL_HANDLE,fence,3)==VK_SUCCESS && now==50000000);
++ assert(late.presentImage(4,VK_NULL_HANDLE,VK_NULL_HANDLE,4)==VK_SUCCESS && now==50000000);
++ assert((indices==std::vector<uint32_t>{1,2,3,4}));
++ ctx.result=VK_ERROR_DEVICE_LOST;
++ assert(late.presentImage(5,VK_NULL_HANDLE,fence,5)==VK_ERROR_DEVICE_LOST && indices.size()==4);
++ nextPresent=VK_SUBOPTIMAL_KHR;
++ assert(late.presentImage(6,VK_NULL_HANDLE,VK_NULL_HANDLE,6)==VK_SUCCESS);
++ nextPresent=VK_ERROR_OUT_OF_DATE_KHR;
++ assert(late.presentImage(7,VK_NULL_HANDLE,VK_NULL_HANDLE,7)==VK_ERROR_OUT_OF_DATE_KHR);
++ std::puts("PASS production 2x/3x/4x tail timing, individual readiness, late rebasing, timeout preserves output and error propagation");
++}
++'''
++p=Path('/work/multiplier-present.cpp');p.write_text(fixture)
++subprocess.run(['g++','-std=c++20','-pthread','-Wall','-Wextra','-Werror','-Wno-missing-field-initializers','-I'+str(root/'thirdparty'),'-I'+str(root/'lsfg-vk-layer/src/modes'),str(p),'-o','/work/multiplier-present'],check=True)
++subprocess.run(['/work/multiplier-present'],check=True)
+--- /dev/null
++++ b/tests/native_bypass_regression.py
+@@ -0,0 +1,61 @@
++"""Compile the production zero-work branch with a fake present driver.
++Checks argument/semaphore ownership and error reset, not GPU execution.
++"""
++from pathlib import Path
++import subprocess
++
++root = Path(__file__).resolve().parents[1]
++source = (root/'lsfg-vk-layer/src/modes/vsync.cpp').read_text()
++start = source.index('    if (imagesToInsert == 0) {')
++end = source.index('    // Dispatch only the work', start)
++branch = source[start:end]
++fixture = r'''
++#include <vulkan/vulkan.h>
++#include <cstdint>
++#include <cstdlib>
++#include <cstdio>
++struct Context { bool invalid=false; void invalidateHistory(){invalid=true;} };
++struct Recovery { bool cleared=false; void reset(){cleared=true;} };
++const VkPresentInfoKHR* expected;
++VkResult result;
++unsigned calls=0;
++VkResult present(VkQueue,const VkPresentInfoKHR* info){
++    ++calls;
++    if(info!=expected || info->waitSemaphoreCount!=2 || !info->pNext) std::abort();
++    if(info->pResults) *info->pResults=result;
++    return result;
++}
++VkResult guardedPresent(PFN_vkQueuePresentKHR f,VkQueue q,const VkPresentInfoKHR* p){return f(q,p);}
++struct Harness {
++    Context context;
++    Context* m_lsfgvkContext=&context;
++    Recovery m_recovery;
++    int64_t m_previousEntryNs=42;
++    VkResult run(unsigned imagesToInsert,const VkPresentInfoKHR* presentInfo){
++        auto fetchFunc=present; VkQueue queue=nullptr;
++''' + branch + r'''
++        return VK_NOT_READY;
++    }
++};
++int main(){
++    int next=0; VkSemaphore semaphores[2]{}; VkResult out=VK_NOT_READY;
++    VkPresentInfoKHR info{}; info.pNext=&next; info.waitSemaphoreCount=2;
++    info.pWaitSemaphores=semaphores;info.pResults=&out;expected=&info;
++    for(auto code:{VK_SUCCESS,VK_SUBOPTIMAL_KHR,VK_ERROR_OUT_OF_DATE_KHR,VK_ERROR_DEVICE_LOST}){
++        Harness h;result=code;calls=0;out=VK_NOT_READY;
++        if(h.run(0,&info)!=code || out!=code || calls!=1 || !h.context.invalid) return 1;
++        bool error=code!=VK_SUCCESS && code!=VK_SUBOPTIMAL_KHR;
++        if(h.m_recovery.cleared!=error || h.m_previousEntryNs!=(error?0:42)) return 2;
++    }
++    Harness h;calls=0;
++    if(h.run(1,&info)!=VK_NOT_READY || calls || h.context.invalid) return 3;
++    info.pResults=nullptr;result=VK_SUCCESS;
++    if(h.run(0,&info)!=VK_SUCCESS) return 4;
++    std::puts("PASS native bypass preserves present arguments, consumes once, resets on errors");
++}
++'''
++fixture = '#include <initializer_list>\n'+fixture
++out=Path('/work/native-bypass-fixture.cpp')
++out.write_text(fixture)
++subprocess.run(['g++','-std=c++20','-Wall','-Wextra','-Werror','-I'+str(root/'thirdparty'),str(out),'-o','/work/native-bypass-test'],check=True)
++subprocess.run(['/work/native-bypass-test'],check=True)
+--- /dev/null
++++ b/tests/output_smoothing_test.cpp
+@@ -0,0 +1,50 @@
++#include "output_smoother.hpp"
++#include "recovery_controller.hpp"
++#include <cstdio>
++#include <cstring>
++#include <cmath>
++using lsfgvk::layer::OutputSmoother;
++using lsfgvk::layer::RecoveryController;
++int main(){
++ int errors=0;auto check=[&](bool ok,const char* s){printf("%s %s\n",ok?"PASS":"FAIL",s);errors+=!ok;};
++ OutputSmoother p;double gap=0;
++ for(int i=0;i<90;++i)gap=p.update(1000.0/30,true,72);
++ check(gap>16 && gap<17,"steady 30fps learns half-period spacing");
++ check(OutputSmoother::deadlineMs(100,16,101)==116,"short present receives remaining gap");
++ check(OutputSmoother::deadlineMs(100,16,125)==125,"blocking present is not delayed again");
++ for(int i=0;i<150;++i)gap=p.update(1000.0/30,true,72);
++ check(gap>16 && gap<17,"healthy smoothing stays active");
++ for(int i=0;i<400;++i)gap=p.update(gap>0?50:1000.0/30,true,72);
++ check(gap==0 && std::strcmp(p.phase(),"rejected")==0,"throughput regression disables smoothing");
++ for(int i=0;i<1200;++i)gap=p.update(1000.0/30,true,72);
++ check(gap==0,"rejected smoothing does not periodically oscillate");
++ p.update(500,true,72);
++ for(int i=0;i<100;++i)gap=p.update(1000.0/30,true,72);
++ check(gap==0,"loading does not reopen a rejected smoothing trial");
++ p.update(33,true,72,false);
++ for(int i=0;i<100;++i)gap=p.update(1000.0/30,true,72,true);
++ check(gap==0,"native backoff and recovery preserve rejected smoothing latch");
++ p.update(33,false,72);
++ for(int i=0;i<100;++i)gap=p.update(1000.0/30,true,72);
++ check(gap>0,"explicit toggle allows new smoothing trial");
++ check(p.update(33,false,72)==0,"off restores original scheduling");
++ RecoveryController c;unsigned n=c.update(0,1,72,true);bool probe=false,returned=false;
++ for(int i=0;i<120;++i){n=c.update(n?50:33.333,1,72,true);probe|=!n;if(probe&&n){returned=true;break;}}
++ check(returned,"setup rejects ineffective backoff");
++ for(int i=0;i<1400;++i)n=c.update(50,1,72,true);
++ bool quiet=true;
++ // One slow half-second window must not cause another half-second FG outage.
++ for(int i=0;i<10;++i){n=c.update(80,1,72,true);quiet &= n==1;}
++ for(int i=0;i<60;++i){n=c.update(50,1,72,true);quiet &= n==1;}
++ check(quiet,"transient worsening cannot reopen failed backoff");
++ c.update(500,1,72,true);
++ for(int i=0;i<21;++i)n=c.update(200,1,72,true);
++ c.update(500,1,72,true);
++ bool pauseQuiet=true;
++ for(int i=0;i<21;++i){n=c.update(200,1,72,true);pauseQuiet &= n==1;}
++ check(pauseQuiet,"pause breaks consecutive worsening evidence");
++ bool accepted=false;
++ for(int i=0;i<700;++i){n=c.update(n?100:33.333,1,72,true);if(!n && std::strcmp(c.phase(),"reduced")==0){accepted=true;break;}}
++ check(accepted,"sustained severe overload still permits beneficial backoff");
++ return errors?1:0;
++}
+--- /dev/null
++++ b/tests/pair_pacer_test.cpp
+@@ -0,0 +1,54 @@
++#include "modes/pair_pacer.hpp"
++#include <cassert>
++#include <cstdint>
++#include <iostream>
++using lsfgvk::layer::PairPacer;
++static void check(int64_t actual, int64_t expected) {
++    if (actual != expected) {
++        std::cerr << "expected " << expected << ", got " << actual << "\n";
++        assert(false);
++    }
++}
++int main() {
++    {
++        PairPacer pacer(10);
++        check(pacer.generatedDeadline(100), 100);
++        check(pacer.originalDeadline(100), 110);
++        pacer.recordOriginal(110);
++        check(pacer.generatedDeadline(112), 120);
++        check(pacer.generatedDeadline(145), 145);
++        check(pacer.originalDeadline(145), 155);
++        pacer.recordOriginal(155);
++        check(pacer.generatedDeadline(157), 165);
++    }
++    {
++        PairPacer pacer(10);
++        pacer.recordOriginal(110);
++        check(pacer.generatedDeadline(112), 120);
++        check(pacer.originalDeadline(128), 138);
++        pacer.recordOriginal(138);
++        check(pacer.generatedDeadline(139), 148);
++    }
++    {
++        PairPacer pacer(10);
++        pacer.recordOriginal(130);
++        pacer.reset();
++        check(pacer.generatedDeadline(12), 12);
++        check(pacer.originalDeadline(12), 22);
++    }
++    {
++        PairPacer pacer(10);
++        check(pacer.generatedDeadline(100), 100);
++        check(pacer.originalDeadline(100), 110);
++        pacer.recordOriginal(110);
++        check(pacer.generatedDeadline(120), 120);
++        check(pacer.originalDeadline(120), 130);
++        pacer.recordOriginal(130);
++        check(pacer.generatedDeadline(140), 140);
++        check(pacer.originalDeadline(140), 150);
++        pacer.recordOriginal(150);
++        check(pacer.generatedDeadline(151), 160);
++    }
++    std::cout << "all passed\n";
++    return 0;
++}
+--- /dev/null
++++ b/tests/present_results_regression.py
+@@ -0,0 +1,199 @@
++#!/usr/bin/env python3
++"""Regression test: LSFG's FINAL original present must propagate pResults.
++
++vkd3d-proton (swapchain.c) passes pResults into vkQueuePresentKHR and does:
++    if (vr == VK_SUCCESS && vk_result != VK_SUCCESS) vr = vk_result;
++LSFG's final original VkPresentInfoKHR omitted pResults, leaving the caller's
++vk_result unwritten. This test extracts the ACTUAL production final-original
++presentInfo2 initializer from lsfg-vk-layer/src/modes/vsync.cpp (the one after
++'// Present the original image') and compiles it into a fixture against the
++bundled Vulkan headers.
++
++Narrow scope, honestly stated: this tests ONLY the extracted initializer's
++pResults plumbing through a fake driver. It does NOT exercise the layer's
++forward() path, GPU presentation, or generated-frame presents.
++
++Usage (operator runs inside remote Docker, choosing a NATIVE compiler there
++so the built exe can be executed directly):
++    python3 present_results_regression.py <native-c++-compiler> <output-directory>
++"""
++
++import os
++import re
++import subprocess
++import sys
++
++
++def extract_initializer(vsync_cpp):
++    with open(vsync_cpp, encoding="utf-8") as source_file:
++        source = source_file.read()
++
++    marker = "// Present the original image"
++    marker_index = source.index(marker)
++    match = re.search(
++        r"const VkPresentInfoKHR presentInfo2\{.*?\};",
++        source[marker_index:],
++        re.DOTALL,
++    )
++    if not match:
++        raise SystemExit(
++            "FAIL: final original presentInfo2 initializer not found in vsync.cpp"
++        )
++    return match.group(0)
++
++
++FIXTURE_PREFIX = r"""#include <vulkan/vulkan.h>
++#include <array>
++#include <cstdio>
++
++static constexpr VkResult SENTINEL = static_cast<VkResult>(0x5E17);
++static VkResult callerResult = SENTINEL;
++static VkResult driverResult = VK_SUCCESS;
++static VkQueue q = (VkQueue)0x1;
++static VkSwapchainKHR sw = (VkSwapchainKHR)0x2;
++static VkSemaphore sem = (VkSemaphore)0x3;
++static uint32_t callerIndex = 3;
++static VkSemaphore presentSemaphore2 = sem;
++
++static VkPresentInfoKHR callerInfo{
++    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++    .pNext = nullptr,
++    .waitSemaphoreCount = 1,
++    .pWaitSemaphores = &presentSemaphore2,
++    .swapchainCount = 1,
++    .pSwapchains = &sw,
++    .pImageIndices = &callerIndex,
++    .pResults = &callerResult
++};
++static const VkPresentInfoKHR* presentInfo = &callerInfo;
++
++static const VkPresentInfoKHR makeActual() {
++"""
++
++FIXTURE_SUFFIX = r"""    return presentInfo2;
++}
++
++static VkResult fakePresent(VkQueue, const VkPresentInfoKHR* info) {
++    if (info->pResults)
++        info->pResults[0] = driverResult;
++    return driverResult;
++}
++
++static int failures = 0;
++
++static void check(const char* name, bool ok) {
++    std::printf("%s %s\n", ok ? "PASS" : "FAIL", name);
++    if (!ok)
++        failures++;
++}
++
++int main() {
++    const std::array<VkResult, 3> wants{
++        VK_SUCCESS,
++        VK_SUBOPTIMAL_KHR,
++        VK_ERROR_OUT_OF_DATE_KHR
++    };
++
++    for (VkResult want : wants) {
++        driverResult = want;
++        callerResult = SENTINEL;
++        callerInfo.pResults = &callerResult;
++
++        const VkPresentInfoKHR actual = makeActual();
++        (void)fakePresent(q, &actual);
++
++        char name[128];
++        std::snprintf(
++            name,
++            sizeof(name),
++            "final original present result=%d propagated",
++            static_cast<int>(want)
++        );
++        check(name, callerResult == want);
++    }
++
++    driverResult = VK_ERROR_OUT_OF_DATE_KHR;
++    callerResult = SENTINEL;
++    callerInfo.pResults = nullptr;
++
++    const VkPresentInfoKHR actual = makeActual();
++    const VkResult result = fakePresent(q, &actual);
++
++    check(
++        "null pResults: no dereference, sentinel untouched, status returned",
++        result == VK_ERROR_OUT_OF_DATE_KHR && callerResult == SENTINEL
++    );
++
++    std::printf(
++        failures ? "RED: %d failure(s)\n" : "GREEN: all passed\n",
++        failures
++    );
++    return failures ? 1 : 0;
++}
++"""
++
++
++def main():
++    if len(sys.argv) != 3:
++        raise SystemExit(
++            "usage: present_results_regression.py "
++            "<native-c++-compiler> <output-directory>"
++        )
++
++    compiler = sys.argv[1]
++    output_directory = os.path.abspath(sys.argv[2])
++    script_directory = os.path.dirname(os.path.abspath(__file__))
++    repo_directory = os.path.dirname(script_directory)
++    vsync_cpp = os.path.join(
++        repo_directory,
++        "lsfg-vk-layer",
++        "src",
++        "modes",
++        "vsync.cpp",
++    )
++
++    os.makedirs(output_directory, exist_ok=True)
++
++    fixture_cpp = os.path.join(
++        output_directory,
++        "present_results_fixture.cpp",
++    )
++    fixture_exe = os.path.join(
++        output_directory,
++        "present_results_fixture",
++    )
++
++    initializer = extract_initializer(vsync_cpp)
++    fixture_source = (
++        FIXTURE_PREFIX
++        + "    "
++        + initializer.replace("\n", "\n    ")
++        + "\n"
++        + FIXTURE_SUFFIX
++    )
++
++    with open(fixture_cpp, "w", encoding="utf-8") as fixture_file:
++        fixture_file.write(fixture_source)
++
++    subprocess.run(
++        [
++            compiler,
++            "-std=c++20",
++            "-Wall",
++            "-Wextra",
++            "-O0",
++            "-I" + os.path.join(repo_directory, "thirdparty"),
++            fixture_cpp,
++            "-o",
++            fixture_exe,
++        ],
++        check=True,
++    )
++
++    # The operator selects a native compiler inside remote Docker, so this
++    # executable is runnable directly in that same environment.
++    raise SystemExit(subprocess.run([fixture_exe], check=False).returncode)
++
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/tests/queue_guard_test.cpp
+@@ -0,0 +1,20 @@
++#include "../lsfg-vk-layer/src/queue_guard.hpp"
++#include <cassert>
++#include <future>
++#include <chrono>
++using namespace lsfgvk::layer;
++using namespace std::chrono_literals;
++int main(){
++ int dispatch=0; void* deviceWords[]={&dispatch}; void* queueAWords[]={&dispatch}; void* queueBWords[]={&dispatch};
++ auto device=reinterpret_cast<VkDevice>(deviceWords);
++ auto a=reinterpret_cast<VkQueue>(queueAWords),b=reinterpret_cast<VkQueue>(queueBWords);
++ auto ma=queueHostMutex(a),mb=queueHostMutex(b);
++ assert(ma==queueHostMutex(a)); assert(ma!=mb);
++ std::promise<void> entered,signal;
++ auto signalled=signal.get_future();
++ auto idle=std::async(std::launch::async,[&]{std::lock_guard lock(*ma);entered.set_value();assert(signalled.wait_for(2s)==std::future_status::ready);});
++ entered.get_future().wait();
++ {std::lock_guard lock(*mb);signal.set_value();}
++ idle.get(); assert(deviceQueueMutexes(device).size()==2);
++ forgetDeviceQueues(device);assert(deviceQueueMutexes(device).empty());
++}
+--- /dev/null
++++ b/tests/recovery_output_test.cpp
+@@ -0,0 +1,39 @@
++#include "recovery_controller.hpp"
++#include <cstdio>
++#include <string_view>
++using lsfgvk::layer::RecoveryController;
++int main() {
++    int errors=0;
++    auto check=[&](bool ok,const char* name){std::printf("%s %s\n",ok?"PASS":"FAIL",name); errors+=!ok;};
++    RecoveryController c; unsigned n=c.update(0,1,72,true);
++    bool probed=false,returned=false;
++    // 2x: 40 total FPS; native: 30 total FPS. Faster originals are NOT a gain.
++    for(int i=0;i<100;++i){n=c.update(n?50:1000.0/30,1,72,true);probed|=!n;if(probed && n){returned=true;break;}}
++    check(probed && returned,"native source speedup must not reduce total output");
++    bool steady=true;
++    for(int i=0;i<1200;++i){n=c.update(n?50:1000.0/30,1,72,true);steady &= n==1;}
++    check(steady,"unchanged capped cadence does not repeat a failed native probe");
++    // Severe overload: 2x 20 total FPS vs native30. Native should be accepted.
++    c.reset();n=c.update(0,1,72,true);bool low=false;
++    for(int i=0;i<70;++i){n=c.update(n?100:1000.0/30,1,72,true);if(!n)low=true;}
++    check(low && n==0,"native remains available when total output improves");
++    // GPU recovers: 2x 40 FPS now beats native30, even though originals slow.
++    // Observe beyond every trial/cooldown, not just one momentary up-trial.
++    for(int i=0;i<1200;++i)n=c.update(n?50:1000.0/30,1,72,true);
++    bool restored=true;
++    for(int i=0;i<1200;++i){n=c.update(n?50:1000.0/30,1,72,true);restored &= n==1;}
++    check(restored,"restored output remains enabled after recovery trials");
++    // Identical output is insufficient reason to keep 2x disabled.
++    c.reset();n=c.update(0,1,72,true);probed=false;returned=false;
++    for(int i=0;i<100;++i){n=c.update(n?1000.0/30:1000.0/60,1,72,true);probed|=!n;if(probed&&n){returned=true;break;}}
++    check(probed&&returned,"equal output does not hold capped mode at native");
++    // The rejected probe latch must allow a later genuinely worse workload.
++    bool accepted=false;
++    for(int i=0;i<400;++i){
++        n=c.update(n?100:1000.0/30,1,72,true);
++        if(!n && std::string_view(c.phase())=="reduced"){accepted=true;break;}
++    }
++    for(int i=0;i<35;++i){n=c.update(n?100:1000.0/30,1,72,true);accepted &= n==0;}
++    check(accepted,"materially worse workload can retry a rejected backoff");
++    return errors?1:0;
++}
+--- /dev/null
++++ b/tests/recovery_scenarios_test.cpp
+@@ -0,0 +1,79 @@
++#include "recovery_controller.hpp"
++#include <cstdio>
++#include <cstdlib>
++#include <limits>
++using lsfgvk::layer::RecoveryController;
++int failures=0;
++void check(bool ok,const char* name) {
++    std::printf("%s %s\n",ok?"PASS":"FAIL",name);
++    if(!ok) ++failures;
++}
++unsigned run(RecoveryController& c,double ms,int frames,unsigned req=1,unsigned cap=30) {
++    unsigned n=0;
++    for(int i=0;i<frames;++i) n=c.update(ms,req,cap,true);
++    return n;
++}
++int main() {
++    RecoveryController c;
++    c.update(0,1,30,true);
++    unsigned n=1;
++    int frames=0;
++    while(n && frames++<50) n=c.update(100,1,30,true);
++    check(n==0,"startup overload detects cap miss");
++    check(run(c,60,25)==1,"ineffective native probe rolls back");
++    bool quiet=true;
++    for(int i=0;i<33;++i) quiet &= c.update(60,1,30,true)==1;
++    check(quiet,"rejected probe cooldown");
++
++    c.reset();c.update(0,1,30,true);n=1;
++    for(int i=0;i<50 && n;++i) n=c.update(100,1,30,true);
++    bool recovered=false;
++    for(int i=0;i<600;++i) if(c.update(1000.0/30,1,30,true)==1){recovered=true;break;}
++    check(recovered,"higher level gets a bounded trial");
++    for(int i=0;i<25 && n!=0;++i) n=c.update(100,1,30,true);
++    // n was zero from the earlier backoff; explicitly observe enough trial frames.
++    n=run(c,100,25);
++    check(n==0,"failed ramp returns to native");
++    quiet=true;
++    for(int i=0;i<60;++i) quiet &= c.update(1000.0/30,1,30,true)==0;
++    check(quiet,"failed ramp does not oscillate");
++    check(c.update(33,1,60,true)==1,"cap change resets old lower level");
++    check(c.update(33,3,60,true)==3,"multiplier change resets controller");
++
++    c.reset();c.update(0,1,0,true);n=1;
++    for(int i=0;i<450 && n;++i) n=c.update(1000.0/30,1,0,true);
++    check(n==0,"uncapped native cadence probe is bounded");
++    check(run(c,1000.0/90,60,1,0)==0,"faster native cadence accepted");
++    recovered=false;
++    for(int i=0;i<1200;++i) if(c.update(1000.0/90,1,0,true)==1){recovered=true;break;}
++    check(recovered,"uncapped recovery trial");
++    check(run(c,1000.0/30,30,1,0)==0,"FIFO-hidden slowdown rejects recovery");
++
++    c.reset();c.update(0,1,30,true);
++    check(run(c,33.333,60)==1,"steady warmup");
++    check(c.update(500,1,30,true)==1,"loading pause is not overload");
++    check(run(c,33.333,60)==1,"loading recovers cadence measurement");
++    check(c.update(std::numeric_limits<double>::quiet_NaN(),1,30,true)==1,"invalid clock sample ignored");
++    check(c.update(-1,1,30,true)==1,"reversed clock sample ignored");
++    c.reset();c.update(0,1,30,true);
++    bool stable=true;
++    for(int i=0;i<900;++i) stable &= c.update(i%2?50:16.667,1,30,true)==1;
++    check(stable,"alternating intervals use mean cadence");
++    c.reset(); n=c.update(0,3,30,true);
++    bool reachedNative=false;
++    const double highCost[]{16,60,70,80};
++    for(int i=0;i<240;++i) {
++        n=c.update(highCost[n],3,30,true);
++        reachedNative |= n==0;
++    }
++    check(reachedNative,"fixed optical-flow cost does not trap high-multiplier backoff");
++    c.reset(); n=c.update(0,3,30,true);
++    bool triedNative=false, rolledBack=false;
++    for(int i=0;i<60;++i) {
++        n=c.update(80,3,30,true);
++        triedNative |= n==0;
++        if(triedNative && n==3) {rolledBack=true;break;}
++    }
++    check(triedNative && rolledBack,"all ineffective levels roll back in bounded time");
++    return failures?1:0;
++}
+--- /dev/null
++++ b/tests/recovery_smoke_test.cpp
+@@ -0,0 +1,27 @@
++#include "recovery_controller.hpp"
++#include <cstdio>
++#include <cstdlib>
++using lsfgvk::layer::RecoveryController;
++void check(bool ok, const char* name) {
++    std::printf("%s %s\n", ok ? "PASS" : "FAIL", name);
++    if (!ok) std::exit(1);
++}
++int main() {
++    RecoveryController c;
++    c.update(0, 1, 30, true);
++    for (int i=0;i<1800;++i) check(c.update(1000.0/30,1,30,true)==1,"capped steady cadence");
++    check(c.update(200,1,30,true)==1,"single stutter");
++    unsigned level=1;
++    for(int i=0;i<50 && level;++i) level=c.update(100,1,30,true);
++    check(level==0,"sustained overload actually stops generation");
++    for(int i=0;i<30;++i) check(c.update(1000.0/30,1,30,true)==0,"no premature recovery");
++    for(int i=0;i<600 && !level;++i) level=c.update(1000.0/30,1,30,true);
++    check(level==1,"eventually tries recovery");
++    for(int i=0;i<180;++i) check(c.update(1000.0/30,1,30,true)==1,"healthy recovery sticks");
++    c.reset();
++    check(c.update(0,3,30,true)==3,"reset");
++    for(int i=0;i<50 && level!=2;++i) level=c.update(60,3,30,true);
++    check(level==2,"one-step backoff");
++    check(c.update(60,3,30,false)==3,"off restores selected multiplier");
++    check(c.update(60,0,30,true)==0,"1x bypass");
++}
+--- /dev/null
++++ b/tests/smoothing_scene_test.cpp
+@@ -0,0 +1,28 @@
++#include "output_smoother.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++using lsfgvk::layer::OutputSmoother;
++int main(){
++ OutputSmoother scene;double gap=0;
++ for(int i=0;i<250;++i)gap=scene.update(1000.0/72,true,72);
++ for(int i=0;i<300;++i)gap=scene.update(1000.0/30,true,72);
++ assert(gap>16 && gap<17); // scene slowdown persists even with smoothing off
++ for(int i=0;i<400;++i)gap=scene.update(1000.0/60,true,72);
++ assert(gap>8 && gap<9);
++ OutputSmoother costly;
++ for(int i=0;i<90;++i)gap=costly.update(1000.0/30,true,72);
++ for(int i=0;i<1000;++i)gap=costly.update(gap>0?50:1000.0/30,true,72);
++ assert(gap==0 && std::strcmp(costly.phase(),"rejected")==0);
++ for(int i=0;i<1200;++i)gap=costly.update(1000.0/30,true,72);
++ assert(gap==0); // an actually costly path must not retry periodically
++ costly.update(500,true,72);
++ for(int i=0;i<100;++i)gap=costly.update(1000.0/30,true,72);
++ assert(gap==0);
++ costly.update(33,true,72,false);
++ for(int i=0;i<100;++i)gap=costly.update(1000.0/30,true,72);
++ assert(gap==0);
++ for(int i=0;i<250;++i)gap=costly.update(1000.0/60,true,72);
++ assert(gap>8 && gap<9); // confirmed off-path cadence changed to a new scene
++ std::puts("PASS scene cadence changes recover; real smoothing cost stays rejected");
++}
+\ No newline at end of file
+--- /dev/null
++++ b/tests/smoothing_wait_regression.py
+@@ -0,0 +1,44 @@
++from pathlib import Path
++import subprocess
++root=Path(__file__).resolve().parents[1]
++s=(root/'lsfg-vk-layer/src/modes/vsync.cpp').read_text()
++a=s.index('        if (smoothGapMs > 0.0 && i == 0) {')
++b=s.index('        if (smoothBatch && i > 0) {',a)
++branch=s[a:b]
++fixture=r'''
++#include <vulkan/vulkan.h>
++#include <initializer_list>
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++struct Context {VkResult result; unsigned calls=0; VkResult waitGeneratedReady(uint64_t ns){if(ns!=32000000)return VK_ERROR_UNKNOWN;++calls;return result;}};
++struct Harness {
++ unsigned m_smoothSamples=0,m_smoothReady=0;
++ Context ctx{}; Context* m_lsfgvkContext=&ctx; VkResult m_pacingFailure=VK_SUCCESS;
++ bool fallthrough=false,spaced=false;
++ VkResult run(double smoothGapMs,VkPresentInfoKHR* presentInfo,size_t i=0){
++ bool smoothThisFrame=false;
++ uint64_t smoothBudgetNs=32000000; unsigned imagesToInsert=1;
++''' + branch + r'''
++ fallthrough=true;spaced=smoothThisFrame;return VK_SUCCESS;
++ }
++};
++int main(){
++ for(auto code:{VK_SUCCESS,VK_TIMEOUT,VK_NOT_READY,VK_ERROR_DEVICE_LOST}){
++  Harness h;h.ctx.result=code;VkResult result=VK_NOT_READY;VkPresentInfoKHR info{};info.pResults=&result;
++  auto rc=h.run(16,&info);bool fatal=code==VK_ERROR_DEVICE_LOST;
++  if(h.ctx.calls!=1 || h.fallthrough==fatal || h.spaced!=(code==VK_SUCCESS))return 1;
++  if(fatal && (rc!=code || result!=code || h.m_pacingFailure!=code))return 2;
++  if(!fatal && (rc!=VK_SUCCESS || result!=VK_NOT_READY || h.m_pacingFailure!=VK_SUCCESS))return 3;
++ }
++ Harness h;VkPresentInfoKHR info{};
++ if(h.run(0,&info)!=VK_SUCCESS || h.ctx.calls || !h.fallthrough || h.spaced)return 4;
++ Harness bad;bad.ctx.result=VK_ERROR_DEVICE_LOST;
++ if(bad.run(16,&info)!=VK_ERROR_DEVICE_LOST)return 5;
++ Harness tail; if(tail.run(16,&info,1)!=VK_SUCCESS || tail.ctx.calls || tail.spaced)return 6;
++ std::puts("PASS production smoothing wait branch: source-period timeout falls through, errors propagate, disabled skips wait");
++}
++'''
++p=Path('/work/smoothing-wait.cpp');p.write_text(fixture)
++subprocess.run(['g++','-std=c++20','-Wall','-Wextra','-Werror','-I'+str(root/'thirdparty'),str(p),'-o','/work/smoothing-wait'],check=True)
++subprocess.run(['/work/smoothing-wait'],check=True)

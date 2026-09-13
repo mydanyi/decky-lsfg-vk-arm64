@@ -51,6 +51,14 @@ CONFIG_SCHEMA_DEF = {
         "location": "toml"
     },
     
+    "adaptive_recovery": {
+        "name": "adaptive_recovery",
+        "fieldType": ConfigFieldType.BOOLEAN,
+        "default": True,
+        "description": "reduce frame generation under overload and recover stable cadence",
+        "location": "toml"
+    },
+
     "performance_mode": {
         "name": "performance_mode",
         "fieldType": ConfigFieldType.BOOLEAN,

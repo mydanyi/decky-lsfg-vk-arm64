@@ -320,16 +320,31 @@ class LegacyZipRemovedTests(CoexistenceTestBase):
 
 
 class MetadataIdentityTests(CoexistenceTestBase):
-    def test_copied_launcher_uses_the_actual_home_and_shell_quotes_it(self):
-        self.decky.DECKY_USER_HOME = str(self.home / "Player's Home")
-        plugin = self.make_plugin()
-        result = asyncio.run(plugin.get_launch_option())
-        self.assertEqual(shlex.split(result['launch_option']),
-                         [str(Path(self.decky.DECKY_USER_HOME) / 'lsfg-arm64'), '%command%'])
-        self.decky.DECKY_USER_HOME = ''
-        result = asyncio.run(self.make_plugin().get_launch_option())
-        self.assertEqual(shlex.split(result['launch_option']),
-                         [str(self.launcher_path()), '%command%'])
+    def test_copied_launcher_expands_home_without_splitting_arguments(self):
+        for home in (self.home / "ordinary", self.home / "Player's Home"):
+            with self.subTest(home=home):
+                home.mkdir(parents=True, exist_ok=True)
+                script = home / "lsfg-arm64"
+                script.write_text('#!/bin/sh\nfor arg in "$@"; do printf "%s\\n" "$arg"; done\n')
+                script.chmod(0o755)
+
+                self.decky.DECKY_USER_HOME = str(home)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    launch_option = asyncio.run(self.make_plugin().get_launch_option())["launch_option"]
+                self.assertEqual(launch_option, "~/lsfg-arm64 %command%")
+
+                completed = subprocess.run(
+                    ["/bin/sh", "-c", launch_option.replace("%command%", "'argument with spaces'")],
+                    env=dict(os.environ, HOME=str(home)),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, "argument with spaces\n")
+
+        with self.subTest(decky_user_home=""):
+            self.decky.DECKY_USER_HOME = ""
+            self.assertEqual(asyncio.run(self.make_plugin().get_launch_option())["launch_option"], "~/lsfg-arm64 %command%")
 
     def test_wrong_enable_flag_is_rejected_and_repaired_in_owned_manifest(self):
         self.seed_upstream()

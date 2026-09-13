@@ -70,6 +70,16 @@ class RuntimeV2Tests(unittest.TestCase):
         self.assertNotIn('LSFGVK_ENV', env)
         self.assertNotIn('LSFGVK_MULTIPLIER', env)
 
+    def test_recovery_survives_profile_save_and_runtime_generation(self):
+        self.data['profiles']['decky-lsfg-vk'].update(adaptive_recovery=True, dxvk_frame_rate=30)
+        env = self.generate()
+        runtime = tomllib.loads(Path(env['LSFGVK_CONFIG']).read_text())['profile'][0]
+        self.assertIs(runtime['adaptive_recovery'], True)
+        self.assertEqual(runtime['recovery_base_fps'], 30)
+        self.assertEqual(runtime['multiplier'], 2)
+        self.assertEqual(env['DXVK_FRAME_RATE'], '30')
+        self.assertEqual(env['VKD3D_FRAME_RATE'], '30')
+
     def test_off_disables_layer_and_sets_runtime_bypass(self):
         self.data['profiles']['decky-lsfg-vk']['multiplier'] = 1
         env = self.generate()

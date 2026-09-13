@@ -6,7 +6,6 @@ Vulkan layer for frame generation on Steam Deck.
 """
 
 import os
-import shlex
 import subprocess
 import hashlib
 from typing import Dict, Any
@@ -256,7 +255,7 @@ class Plugin:
         Returns:
             Dict containing the launch option string and instructions
         """
-        entry = shlex.quote(str(self.installation_service.lsfg_launch_script_path))
+        entry = "~/lsfg-arm64"
         return {
             "launch_option": f"{entry} %command%",
             "instructions": "Add this to your game's launch options in Steam Properties",

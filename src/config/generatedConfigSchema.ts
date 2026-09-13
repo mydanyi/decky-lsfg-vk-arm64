@@ -12,6 +12,7 @@ export const DLL = "dll" as const;
 export const NO_FP16 = "no_fp16" as const;
 export const MULTIPLIER = "multiplier" as const;
 export const FLOW_SCALE = "flow_scale" as const;
+export const ADAPTIVE_RECOVERY = "adaptive_recovery" as const;
 export const PERFORMANCE_MODE = "performance_mode" as const;
 export const HDR_MODE = "hdr_mode" as const;
 export const EXPERIMENTAL_PRESENT_MODE = "experimental_present_mode" as const;
@@ -57,6 +58,12 @@ export const CONFIG_SCHEMA: Record<string, ConfigField> = {
     fieldType: ConfigFieldType.FLOAT,
     default: 0.8,
     description: "change the flow scale"
+  },
+  adaptive_recovery: {
+    name: "adaptive_recovery",
+    fieldType: ConfigFieldType.BOOLEAN,
+    default: true,
+    description: "reduce frame generation under overload and recover stable cadence"
   },
   performance_mode: {
     name: "performance_mode",
@@ -132,6 +139,7 @@ export interface ConfigurationData {
   no_fp16: boolean;
   multiplier: number;
   flow_scale: number;
+  adaptive_recovery: boolean;
   performance_mode: boolean;
   hdr_mode: boolean;
   experimental_present_mode: string;
@@ -156,6 +164,7 @@ export function getDefaults(): ConfigurationData {
     no_fp16: false,
     multiplier: 1,
     flow_scale: 0.8,
+    adaptive_recovery: true,
     performance_mode: false,
     hdr_mode: false,
     experimental_present_mode: "fifo",
@@ -176,6 +185,7 @@ export function getFieldTypes(): Record<string, ConfigFieldType> {
     no_fp16: ConfigFieldType.BOOLEAN,
     multiplier: ConfigFieldType.INTEGER,
     flow_scale: ConfigFieldType.FLOAT,
+    adaptive_recovery: ConfigFieldType.BOOLEAN,
     performance_mode: ConfigFieldType.BOOLEAN,
     hdr_mode: ConfigFieldType.BOOLEAN,
     experimental_present_mode: ConfigFieldType.STRING,

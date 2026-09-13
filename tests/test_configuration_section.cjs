@@ -59,6 +59,7 @@ const reactIconsStub = {
 };
 
 const configSchemaStub = {
+  ADAPTIVE_RECOVERY: 'adaptive_recovery',
   FLOW_SCALE: 'flow_scale',
   NO_FP16: 'no_fp16',
   PERFORMANCE_MODE: 'performance_mode',
@@ -137,8 +138,9 @@ function render(runtimeV2) {
     enable_wsi: false,
     enable_zink: false,
   };
-  const tree = ConfigurationSection({ config, onConfigChange: async () => {}, runtimeV2 });
-  return { components: collectComponents(tree), strings: collectStrings(tree) };
+  const changes = [];
+  const tree = ConfigurationSection({ config, onConfigChange: async (...args) => { changes.push(args); }, runtimeV2 });
+  return { components: collectComponents(tree), strings: collectStrings(tree), changes };
 }
 
 const cases = [];
@@ -217,6 +219,17 @@ check('no minimum FPS control is rendered', () => {
     ...labels(v1, 'ToggleField'),
   ];
   assert.ok(!allLabels.some((label) => /min(imum)?\s*fps/i.test(label)), JSON.stringify(allLabels));
+});
+
+check('recovery defaults on below performance mode and writes only its own saved setting', () => {
+  const toggle = v2.components.find((node) => node.__component === 'ToggleField' &&
+    node.props.label === 'Overload Backoff and Cadence Recovery');
+  assert.ok(toggle, 'recovery toggle missing');
+  assert.strictEqual(toggle.props.checked, true);
+  const controls = v2.components.filter((node) => ['ToggleField', 'SliderField'].includes(node.__component));
+  assert.strictEqual(controls[controls.indexOf(toggle) - 1].props.label, 'Performance Mode');
+  toggle.props.onChange(false);
+  assert.deepStrictEqual(v2.changes, [['adaptive_recovery', false]]);
 });
 
 console.log(cases.join('\n'));
