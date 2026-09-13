@@ -4,6 +4,12 @@
 
 [下载发布版](https://github.com/mydanyi/decky-lsfg-vk-arm64/releases/latest)
 
+## 赞助与交流
+
+- 爱发电赞助：[https://afdian.com/a/meetmiku](https://afdian.com/a/meetmiku)
+- QQ 粉丝群：**487945399**
+- QQ 养老群：**477426414**
+
 ## 功能
 
 - 简体中文界面，支持补帧倍率、光流比例、性能模式和配置档案。
