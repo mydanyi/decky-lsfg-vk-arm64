@@ -1040,17 +1040,16 @@
      this->m_syncPasses.resize(this->m_swapchainImages.size());
      for (auto& syncPass : this->m_syncPasses) {
          syncPass.copyCmdbuf = vkhelper::createCommandBuffer(
-@@ -138,15 +262,85 @@
+@@ -138,15 +262,84 @@
      VkQueue queue,
      const VkPresentInfoKHR* presentInfo
  ) {
-+    const auto finishPresent = [this, presentInfo](VkResult result) {
++    const auto finishPresent = [this, presentInfo](VkResult result, bool batchIncomplete = false) {
 +        if (presentInfo->pResults) presentInfo->pResults[0] = result;
 +        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-+            // A failed intermediate present may leave the batch incomplete.
-+            // Retain its actual error until this swapchain is recreated;
-+            // retrying could wait on a fence whose final copy was never queued.
-+            this->m_pacingFailure = result;
++            // Only an abandoned intermediate batch can leave the final copy
++            // unqueued. Final-present errors must allow the driver to retry.
++            if (batchIncomplete) this->m_pacingFailure = result;
 +            this->m_recovery.reset();
 +            this->m_outputSmoother.reset();
 +            this->m_previousEntryNs = 0;
@@ -1127,7 +1126,7 @@
  
      if (status == VK_ERROR_OUT_OF_DATE_KHR) {
          this->resizeInnerSyncPasses(profile.multiplier - 1);
-@@ -172,8 +366,54 @@
+@@ -172,8 +365,54 @@
          }
      }
  
@@ -1184,7 +1183,7 @@
  
      this->m_lsfgvkContext->dispatch(
          *syncPass.copyCmdbuf,
-@@ -188,13 +428,31 @@
+@@ -188,13 +427,31 @@
          const auto& innerSyncPass{syncPass.innerSyncPasses.at(i)};
  
          // Acquire swapchain image
@@ -1223,7 +1222,7 @@
  
          // Copy generated frame into swapchain image
          const auto& swapchainImage{this->m_swapchainImages.at(acquireResult.value)};
-@@ -211,6 +469,59 @@
+@@ -211,6 +468,59 @@
              { *innerSyncPass.acquireSemaphore },
              signalSemaphores
          );
@@ -1251,7 +1250,7 @@
 +                acquireResult.value, static_cast<VkSemaphore>(*innerSyncPass.copySemaphore),
 +                this->m_lsfgvkContext->generatedReadyFence(), static_cast<unsigned>(i));
 +            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
-+                return finishPresent(result);
++                return finishPresent(result, true);
 +            if (result == VK_SUBOPTIMAL_KHR) generatedResult = result;
 +            continue;
 +        }
@@ -1283,7 +1282,7 @@
  
          // Present swapchain image
          VkSemaphore copySemaphore2{*innerSyncPass.copySemaphore}; // NOLINT (32-bit const)
-@@ -223,9 +534,30 @@
+@@ -223,9 +533,30 @@
              .pSwapchains = presentInfo->pSwapchains,
              .pImageIndices = &acquireResult.value
          };
@@ -1302,7 +1301,7 @@
 +                    "[lsfgvk-diag]   generated present[%zu] failed %d\n",
 +                    i, (int)result);
 +            }
-+            return finishPresent(result);
++            return finishPresent(result, true);
 +        }
 +        if (result == VK_SUBOPTIMAL_KHR) generatedResult = result;
 +        if (smoothThisFrame && i == 0) {
@@ -1316,7 +1315,7 @@
          }
      }
  
-@@ -237,12 +569,54 @@
+@@ -237,12 +568,59 @@
          .pWaitSemaphores = &presentSemaphore2,
          .swapchainCount = 1,
          .pSwapchains = presentInfo->pSwapchains,
@@ -1337,7 +1336,12 @@
 +        pacingSleepUntil(this->m_pairPacer->originalDeadline(actualGenStart));
 +    }
 +    const int64_t actualOrigStart{pacing ? pacingNowNs() : 0};
-+    const auto result{guardedPresent(fetchFunc, queue, &presentInfo2)};
++    auto result{guardedPresent(fetchFunc, queue, &presentInfo2)};
++    // The driver may report a per-swapchain status despite overall success.
++    // Read it before finishPresent writes the combined result back to callers.
++    if (result == VK_SUCCESS && presentInfo2.pResults) {
++        result = presentInfo2.pResults[0];
++    }
 +    const int64_t endNs{timingThis ? pacingNowNs() : 0};
 +    if (pacing && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)) {
 +        this->m_pairPacer->recordOriginal(actualOrigStart);
@@ -2795,6 +2799,140 @@
 +
 +if __name__ == "__main__":
 +    main()
+--- /dev/null
++++ b/tests/present_status_recovery_regression.py
+@@ -0,0 +1,131 @@
++"""Exercise production final-present branches with independently controlled results.
++
++This is a fake-driver regression, not a GPU or game performance test. It extracts
++the full final-present code plus its result handling, rather than just the
++VkPresentInfoKHR initializer, so overwriting a driver-written pResults is visible.
++"""
++from pathlib import Path
++import subprocess
++
++root = Path(__file__).resolve().parents[1]
++source = (root / 'lsfg-vk-layer/src/modes/vsync.cpp').read_text()
++helpers = source[source.index('    struct SmoothBatch {'):
++                 source.index('    std::optional<PairPacer> pacingFromEnvironment()')]
++start = source.index('    const auto finishPresent =')
++entry = source[start:source.index('    try {', start)]
++start = source.index('    // Present the original image')
++final = source[start:source.index('    } catch (...) {', start)]
++fixture = r'''
++#include <vulkan/vulkan.h>
++#include "present_schedule.hpp"
++#include <optional>
++#include <memory>
++#include <cstdio>
++#include <cinttypes>
++using namespace lsfgvk::layer;
++int64_t pacingNowNs() { return 0; }
++void pacingSleepUntil(int64_t) {}
++struct ContextWrapper {
++ VkResult waitGeneratedReady(uint64_t, VkFence) { return VK_SUCCESS; }
++ void invalidateHistory() {}
++};
++VkResult driverReturn = VK_SUCCESS, driverPer = VK_SUCCESS;
++unsigned driverCalls = 0;
++VkResult guardedPresent(PFN_vkQueuePresentKHR, VkQueue, const VkPresentInfoKHR* info,
++                        int64_t* start = nullptr) {
++ ++driverCalls;
++ if (start) *start = 0;
++ if (info->pResults) *info->pResults = driverPer;
++ return driverReturn;
++}
++''' + helpers + r'''
++struct Harness {
++ struct Reset {
++  void reset() {}
++  int64_t originalDeadline(int64_t) { return 0; }
++  void recordOriginal(int64_t) {}
++ };
++ Reset m_recovery, m_outputSmoother;
++ std::optional<Reset> m_pairPacer;
++ std::unique_ptr<ContextWrapper> m_lsfgvkContext = std::make_unique<ContextWrapper>();
++ int64_t m_previousEntryNs = 0;
++ unsigned m_pacingTimingCount = 0;
++ VkResult m_pacingFailure = VK_SUCCESS;
++ VkResult run(VkPresentInfoKHR* presentInfo, bool smooth, unsigned outputs,
++              VkResult generatedResult = VK_SUCCESS) {
++''' + entry + r'''
++  VkSemaphore semaphore = VK_NULL_HANDLE;
++  struct { VkSemaphore* presentSemaphore; } syncPass{&semaphore};
++  std::optional<SmoothBatch> smoothBatch;
++  if (smooth) smoothBatch.emplace(SmoothBatch{m_lsfgvkContext.get(), nullptr,
++   VK_NULL_HANDLE, VK_NULL_HANDLE, PresentSchedule(0, 0), 33333333, outputs, false});
++  unsigned imagesToInsert = outputs - 1;
++  bool pacing = false, timingThis = false, diagThis = false;
++  int64_t actualGenStart = 0, entryNs = 0, readyNs = 0;
++  PFN_vkQueuePresentKHR fetchFunc = nullptr;
++  VkQueue queue = VK_NULL_HANDLE;
++''' + final + r'''
++ }
++};
++int main() {
++ unsigned failures = 0, cases = 0;
++ for (bool smooth : {false, true}) for (unsigned outputs : {2u, 3u, 4u}) {
++  uint32_t index = 0;
++  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
++  VkResult per = VK_NOT_READY;
++  VkPresentInfoKHR info{};
++  info.pImageIndices = &index; info.pSwapchains = &swapchain;
++  for (bool hasResults : {false, true}) {
++   info.pResults = hasResults ? &per : nullptr;
++   for (VkResult status : {VK_SUBOPTIMAL_KHR, VK_ERROR_OUT_OF_DATE_KHR}) {
++    Harness h;
++    driverReturn = VK_SUCCESS; driverPer = status; per = VK_NOT_READY;
++    const VkResult expected = (smooth || hasResults) ? status : VK_SUCCESS;
++    auto result = h.run(&info, smooth, outputs);
++    ++cases;
++    if (result != expected || (hasResults && per != expected)) {
++     ++failures;
++     std::printf("FAIL split status smooth=%d outputs=%u pResults=%d status=%d got=%d per=%d\n",
++      smooth, outputs, hasResults, status, result, per);
++    }
++   }
++   for (VkResult error : {VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY}) {
++    Harness h;
++    driverCalls = 0; driverReturn = error; driverPer = error; per = VK_NOT_READY;
++    auto failed = h.run(&info, smooth, outputs);
++    ++cases;
++    if (failed != error || (hasResults && per != error)) ++failures;
++    driverReturn = driverPer = VK_SUCCESS;
++    auto recovered = h.run(&info, smooth, outputs);
++    if (recovered != VK_SUCCESS || driverCalls != 2 || (hasResults && per != VK_SUCCESS)) {
++     ++failures;
++     std::printf("FAIL final retry smooth=%d outputs=%u pResults=%d error=%d result=%d calls=%u\n",
++      smooth, outputs, hasResults, error, recovered, driverCalls);
++    }
++   }
++   // A stale caller value must not override a new successful driver result.
++   Harness h; driverReturn = driverPer = VK_SUCCESS; per = VK_ERROR_OUT_OF_DATE_KHR;
++   ++cases;
++   if (h.run(&info, smooth, outputs) != VK_SUCCESS || (hasResults && per != VK_SUCCESS)) ++failures;
++   // Generated SUBOPTIMAL survives a successful original; original errors win.
++   for (VkResult original : {VK_SUCCESS, VK_ERROR_OUT_OF_DATE_KHR}) {
++    Harness generated; driverReturn = original; driverPer = original;
++    auto expected = original == VK_SUCCESS ? VK_SUBOPTIMAL_KHR : original;
++    ++cases;
++    if (generated.run(&info, smooth, outputs, VK_SUBOPTIMAL_KHR) != expected ||
++        (hasResults && per != expected)) ++failures;
++   }
++  }
++ }
++ std::printf("%s %u cases, %u failures: final status and retry recovery at 2x/3x/4x\n",
++             failures ? "FAIL" : "PASS", cases, failures);
++ return failures ? 1 : 0;
++}
++'''
++out = Path('/work/present-status-recovery.cpp')
++out.write_text(fixture)
++subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror',
++                '-Wno-missing-field-initializers', '-I' + str(root / 'thirdparty'),
++                '-I' + str(root / 'lsfg-vk-layer/src/modes'), str(out),
++                '-o', '/work/present-status-recovery'], check=True)
++subprocess.run(['/work/present-status-recovery'], check=True, timeout=10)
 --- /dev/null
 +++ b/tests/queue_guard_test.cpp
 @@ -0,0 +1,20 @@
