@@ -1,6 +1,6 @@
 # ARM64 核心补丁
 
-`patches/0001-arm64-recovery.patch` 基于 [lsfg-vk](https://git.lsfg-vk.dev/lsfg-vk.git) 提交 `0e7a3898c1285b13df8596f2bd2cbb8f85b4383b`，保留已有呈现修正，并加入过载退让、帧节奏恢复及恢复时的图像历史重置。补丁独立实现调度策略，不包含 MAKO 源码或商业 DLL。
+`patches/0001-arm64-recovery.patch` 基于 [lsfg-vk](https://git.lsfg-vk.dev/lsfg-vk.git) 提交 `0e7a3898c1285b13df8596f2bd2cbb8f85b4383b`，保留已有呈现修正，并加入过载退让、帧节奏恢复和“目标模式”。目标模式按目标 FPS 与实际成功输出做有界预算，使用独立的跨批次呈现调度，并在 fixed/target 实时切换时清理两套策略状态。补丁独立实现调度策略，不包含 MAKO 源码或商业 DLL。
 
 核心沿用上游的 `CC-BY-NC-ND-4.0` 许可，插件外壳的许可不覆盖核心。
 

@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import shlex
+from shared_config import validate_generation_settings
 
 LAYER_NAME = 'VK_LAYER_LSFGVK_ARM64_frame_generation'
 ARM_BINARY = 'liblsfg-vk-v2-arm64.so'
@@ -26,8 +27,16 @@ def dll_path(value: str) -> str:
     return str(path)
 
 
+def effective_multiplier(config: dict) -> int:
+    validate_generation_settings(config)
+    if config.get('generation_mode', 'fixed') == 'target':
+        return config.get('target_max_multiplier', 4)
+    return int(config.get('multiplier', 1))
+
+
 def runtime_toml(config: dict) -> str:
-    multiplier = int(config.get('multiplier', 1))
+    multiplier = effective_multiplier(config)
+    target_fps = config.get('target_fps', 60) if config.get('generation_mode', 'fixed') == 'target' else 0
     flow = float(config.get('flow_scale', 0.8))
     if multiplier < 1 or not 0.25 <= flow <= 1.0:
         raise ValueError('Invalid lsfg-vk multiplier or flow scale')
@@ -40,7 +49,7 @@ def runtime_toml(config: dict) -> str:
         lines.append(f'dll = {json.dumps(dll, ensure_ascii=False)}')
     lines.extend(['', '[[profile]]', f'name = "{RUNTIME_PROFILE}"',
                   'pacing_mode = "vsync"', 'override_present_mode = true',
-                  f'multiplier = {multiplier}', f'flow_scale = {flow}',
+                  f'multiplier = {multiplier}', f'target_fps = {target_fps}', f'flow_scale = {flow}',
                   f'performance_mode = {boolean(config.get("performance_mode", False))}',
                   f'adaptive_recovery = {boolean(config.get("adaptive_recovery", True))}',
                   f'recovery_base_fps = {max(0, int(config.get("dxvk_frame_rate", 0)))}', ''])
@@ -48,8 +57,8 @@ def runtime_toml(config: dict) -> str:
 
 
 def is_enabled(config: dict) -> bool:
-    """Frame generation is active only above the 1x bypass multiplier."""
-    return int(config.get('multiplier', 1)) > 1
+    """Target mode loads the layer regardless of the saved fixed multiplier."""
+    return effective_multiplier(config) > 1
 
 
 def launch_lines(config: dict, path: Path) -> list[str]:
@@ -83,7 +92,7 @@ def launch_lines(config: dict, path: Path) -> list[str]:
         f'export LSFGVK_CONFIG={shlex.quote(str(path))}',
         f'export LSFGVK_PROFILE={RUNTIME_PROFILE}',
     ])
-    multiplier = int(config.get('multiplier', 1))
+    multiplier = effective_multiplier(config)
     dxvk_frame_rate = int(config.get('dxvk_frame_rate', 0))
     if multiplier == 2 and 1 <= dxvk_frame_rate <= 72:
         # Keep the tested GPU policy, but leave ordinary driver caps intact.

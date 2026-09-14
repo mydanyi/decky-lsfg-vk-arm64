@@ -15,6 +15,9 @@ from shared_config import CONFIG_SCHEMA_DEF, ConfigFieldType
 # Field name constants for type-safe access
 DLL = "dll"
 NO_FP16 = "no_fp16"
+GENERATION_MODE = "generation_mode"
+TARGET_FPS = "target_fps"
+TARGET_MAX_MULTIPLIER = "target_max_multiplier"
 MULTIPLIER = "multiplier"
 FLOW_SCALE = "flow_scale"
 ADAPTIVE_RECOVERY = "adaptive_recovery"
@@ -35,6 +38,9 @@ class ConfigurationData(TypedDict):
     """Type-safe configuration data structure - AUTO-GENERATED"""
     dll: str
     no_fp16: bool
+    generation_mode: str
+    target_fps: int
+    target_max_multiplier: int
     multiplier: int
     flow_scale: float
     adaptive_recovery: bool
@@ -128,4 +134,4 @@ def get_script_generation_logic():
     return generate_script_lines
 
 
-ALL_FIELDS = ['dll', 'no_fp16', 'multiplier', 'flow_scale', 'adaptive_recovery', 'performance_mode', 'hdr_mode', 'experimental_present_mode', 'dxvk_frame_rate', 'enable_wow64', 'disable_steamdeck_mode', 'mangohud_workaround', 'disable_vkbasalt', 'force_enable_vkbasalt', 'enable_wsi', 'enable_zink']
+ALL_FIELDS = ['dll', 'no_fp16', 'generation_mode', 'target_fps', 'target_max_multiplier', 'multiplier', 'flow_scale', 'adaptive_recovery', 'performance_mode', 'hdr_mode', 'experimental_present_mode', 'dxvk_frame_rate', 'enable_wow64', 'disable_steamdeck_mode', 'mangohud_workaround', 'disable_vkbasalt', 'force_enable_vkbasalt', 'enable_wsi', 'enable_zink']

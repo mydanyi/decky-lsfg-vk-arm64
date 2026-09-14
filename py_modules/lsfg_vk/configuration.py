@@ -418,6 +418,10 @@ class ConfigurationService(BaseService):
                                           f"Profile '{profile_name}' does not exist", 
                                           config=None)
             
+            # Validate before replacing anything on disk: an invalid target or
+            # multiplier must leave the saved profile and launcher untouched.
+            ConfigurationManager.validate_config(config)
+
             # Update the profile's config
             profile_data["profiles"][profile_name] = config
             

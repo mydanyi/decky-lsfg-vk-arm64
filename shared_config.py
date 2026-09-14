@@ -35,6 +35,30 @@ CONFIG_SCHEMA_DEF = {
         "location": "toml"
     },
     
+    "generation_mode": {
+        "name": "generation_mode",
+        "fieldType": ConfigFieldType.STRING,
+        "default": "fixed",
+        "description": "choose fixed multiplier or target frame rate",
+        "location": "toml"
+    },
+
+    "target_fps": {
+        "name": "target_fps",
+        "fieldType": ConfigFieldType.INTEGER,
+        "default": 60,
+        "description": "target output frame rate from 30 to 240 FPS",
+        "location": "toml"
+    },
+
+    "target_max_multiplier": {
+        "name": "target_max_multiplier",
+        "fieldType": ConfigFieldType.INTEGER,
+        "default": 4,
+        "description": "maximum multiplier in target mode from 2 to 4",
+        "location": "toml"
+    },
+
     "multiplier": {
         "name": "multiplier",
         "fieldType": ConfigFieldType.INTEGER,
@@ -147,6 +171,17 @@ CONFIG_SCHEMA_DEF = {
         "location": "script"
     }
 }
+
+
+def validate_generation_settings(config: Dict[str, Any]) -> None:
+    """Reject invalid target settings before numeric or string coercion."""
+    if config.get("generation_mode", "fixed") not in ("fixed", "target"):
+        raise ValueError("generation_mode must be fixed or target")
+    for field_name, minimum, maximum in (("target_fps", 30, 240),
+                                          ("target_max_multiplier", 2, 4)):
+        value = config.get(field_name, CONFIG_SCHEMA_DEF[field_name]["default"])
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"{field_name} must be an integer from {minimum} to {maximum}")
 
 
 def get_field_names() -> list[str]:
