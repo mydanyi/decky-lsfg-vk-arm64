@@ -88,6 +88,31 @@ class RuntimeV2Tests(unittest.TestCase):
         self.assertNotIn('LSFG_PROCESS', env)
         self.assertEqual(tomllib.loads(Path(env['LSFGVK_CONFIG']).read_text())['profile'][0]['multiplier'], 1)
 
+    def test_target_profile_update_launches_with_saved_off_multiplier_and_keeps_manual_cap(self):
+        self.generate()
+        config = dict(self.data['profiles']['decky-lsfg-vk'], generation_mode='target',
+                      target_fps=120, target_max_multiplier=4, multiplier=1, dxvk_frame_rate=40)
+        result = self.service.update_profile_config('decky-lsfg-vk', config)
+        self.assertTrue(result['success'], result)
+        loaded = self.service.get_config()['config']
+        self.assertEqual(loaded.get('generation_mode'), 'target')
+        self.assertEqual(loaded['multiplier'], 1)
+        env = json.loads(subprocess.check_output(['bash', str(self.service.lsfg_script_path),
+            sys.executable, '-c', 'import os,json;print(json.dumps(dict(os.environ)))']))
+        self.assertEqual(env.get('ENABLE_LSFGVK_ARM64'), '1')
+        self.assertEqual((env['DXVK_FRAME_RATE'], env['VKD3D_FRAME_RATE']), ('40', '40'))
+        profile = tomllib.loads(Path(env['LSFGVK_CONFIG']).read_text())['profile'][0]
+        self.assertEqual((profile.get('target_fps'), profile['multiplier']), (120, 4))
+
+    def test_invalid_target_update_does_not_replace_saved_config_or_launcher(self):
+        self.generate()
+        before = [path.read_bytes() for path in [self.service.config_file_path, self.service.lsfg_script_path]]
+        config = dict(self.data['profiles']['decky-lsfg-vk'], generation_mode='target', target_fps=241)
+        result = self.service.update_profile_config('decky-lsfg-vk', config)
+        self.assertFalse(result['success'])
+        after = [path.read_bytes() for path in [self.service.config_file_path, self.service.lsfg_script_path]]
+        self.assertEqual(after, before)
+
     def test_profile_change_uses_stable_runtime_name(self):
         first = self.generate()
         self.assertIn('LSFGVK_CONFIG', first)

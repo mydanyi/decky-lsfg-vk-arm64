@@ -18,7 +18,7 @@ from pathlib import Path
 
 # Import shared configuration constants
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from shared_config import CONFIG_SCHEMA_DEF, ConfigFieldType, get_field_names, get_defaults, get_field_types
+from shared_config import CONFIG_SCHEMA_DEF, ConfigFieldType, get_field_names, get_defaults, get_field_types, validate_generation_settings
 
 # Import auto-generated configuration components
 from .config_schema_generated import ConfigurationData, get_script_parsing_logic, get_script_generation_logic
@@ -150,6 +150,7 @@ class ConfigurationManager:
     @staticmethod
     def validate_config(config: Dict[str, Any]) -> ConfigurationData:
         """Validate and convert configuration data"""
+        validate_generation_settings(config)
         validated = {}
         
         for field_name, field_def in COMPLETE_CONFIG_SCHEMA.items():

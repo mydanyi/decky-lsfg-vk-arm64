@@ -10,6 +10,9 @@ export enum ConfigFieldType {
 // Field name constants for type-safe access
 export const DLL = "dll" as const;
 export const NO_FP16 = "no_fp16" as const;
+export const GENERATION_MODE = "generation_mode" as const;
+export const TARGET_FPS = "target_fps" as const;
+export const TARGET_MAX_MULTIPLIER = "target_max_multiplier" as const;
 export const MULTIPLIER = "multiplier" as const;
 export const FLOW_SCALE = "flow_scale" as const;
 export const ADAPTIVE_RECOVERY = "adaptive_recovery" as const;
@@ -46,6 +49,24 @@ export const CONFIG_SCHEMA: Record<string, ConfigField> = {
     fieldType: ConfigFieldType.BOOLEAN,
     default: false,
     description: "force-disable fp16 (use on older nvidia cards)"
+  },
+  generation_mode: {
+    name: "generation_mode",
+    fieldType: ConfigFieldType.STRING,
+    default: "fixed",
+    description: "choose fixed multiplier or target frame rate"
+  },
+  target_fps: {
+    name: "target_fps",
+    fieldType: ConfigFieldType.INTEGER,
+    default: 60,
+    description: "target output frame rate from 30 to 240 FPS"
+  },
+  target_max_multiplier: {
+    name: "target_max_multiplier",
+    fieldType: ConfigFieldType.INTEGER,
+    default: 4,
+    description: "maximum multiplier in target mode from 2 to 4"
   },
   multiplier: {
     name: "multiplier",
@@ -137,6 +158,9 @@ export const CONFIG_SCHEMA: Record<string, ConfigField> = {
 export interface ConfigurationData {
   dll: string;
   no_fp16: boolean;
+  generation_mode: string;
+  target_fps: number;
+  target_max_multiplier: number;
   multiplier: number;
   flow_scale: number;
   adaptive_recovery: boolean;
@@ -162,6 +186,9 @@ export function getDefaults(): ConfigurationData {
   return {
     dll: "/games/Lossless Scaling/Lossless.dll",
     no_fp16: false,
+    generation_mode: "fixed",
+    target_fps: 60,
+    target_max_multiplier: 4,
     multiplier: 1,
     flow_scale: 0.8,
     adaptive_recovery: true,
@@ -183,6 +210,9 @@ export function getFieldTypes(): Record<string, ConfigFieldType> {
   return {
     dll: ConfigFieldType.STRING,
     no_fp16: ConfigFieldType.BOOLEAN,
+    generation_mode: ConfigFieldType.STRING,
+    target_fps: ConfigFieldType.INTEGER,
+    target_max_multiplier: ConfigFieldType.INTEGER,
     multiplier: ConfigFieldType.INTEGER,
     flow_scale: ConfigFieldType.FLOAT,
     adaptive_recovery: ConfigFieldType.BOOLEAN,
